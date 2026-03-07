@@ -238,7 +238,7 @@ def dataframe_para_excel_bytes(df: pd.DataFrame, nome_aba: str = "Resultado") ->
     return output.getvalue()
 
 
-st.title("Busca Semântica para Orçamento")
+st.title("Orçamento IA - VSN")
 st.caption("Importe a base de dados e a planilha a preencher, escolha as colunas e gere o arquivo preenchido.")
 
 with st.sidebar:
@@ -357,5 +357,6 @@ st.markdown(
 ```
 """
 )
+
 
 
