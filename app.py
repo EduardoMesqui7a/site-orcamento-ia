@@ -9,7 +9,7 @@ from rapidfuzz import fuzz
 from sentence_transformers import SentenceTransformer, util
 from unidecode import unidecode
 
-st.set_page_config(page_title="Busca Semântica de Orçamento", layout="wide")
+st.set_page_config(page_title="Orçamento IA - VSN", layout="wide")
 
 MODELO_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 PESO_SEMANTICO = 0.70
@@ -357,4 +357,5 @@ st.markdown(
 ```
 """
 )
+
 
