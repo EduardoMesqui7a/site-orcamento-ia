@@ -353,23 +353,8 @@ else:
 st.divider()
 st.markdown(
     """
-### Como publicar gratuitamente
-A forma mais simples é usar o Streamlit Community Cloud.
-
-Você precisará de:
-1. Uma conta no GitHub.
-2. Um repositório com este arquivo `app.py`.
-3. Um arquivo `requirements.txt` com as dependências.
-
-Conteúdo sugerido para `requirements.txt`:
-```txt
-streamlit
-pandas
-openpyxl
-sentence-transformers
-rapidfuzz
-unidecode
-torch
+### Preencha passo a passo para habilitar a próxima etapa
 ```
 """
 )
+
