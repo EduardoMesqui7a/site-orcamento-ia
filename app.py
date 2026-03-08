@@ -329,12 +329,17 @@ def processar_preenchimento(
     return df_destino_proc
 
 
-def numero_coluna_excel(indice_base_1: int) -> str:
-    resultado = ""
-    while indice_base_1 > 0:
-        indice_base_1, resto = divmod(indice_base_1 - 1, 26)
-        resultado = chr(65 + resto) + resultado
-    return resultado
+def obter_celula_segura_para_escrita(ws, linha: int, coluna: int):
+    for merged_range in ws.merged_cells.ranges:
+        if (
+            merged_range.min_row <= linha <= merged_range.max_row
+            and merged_range.min_col <= coluna <= merged_range.max_col
+        ):
+            if merged_range.min_row == merged_range.max_row == linha:
+                return ws.cell(row=merged_range.min_row, column=merged_range.min_col)
+            return None
+
+    return ws.cell(row=linha, column=coluna)
 
 
 def aplicar_resultado_no_excel_original(
@@ -355,7 +360,7 @@ def aplicar_resultado_no_excel_original(
     mapa_colunas_destino = {}
     for nome_coluna in colunas_destino_preencher:
         indice_df = df_original.columns.get_loc(nome_coluna) + 1
-        mapa_colunas_destino[nome_coluna] = numero_coluna_excel(indice_df)
+        mapa_colunas_destino[nome_coluna] = indice_df
 
     for i in range(len(df_resultado)):
         linha_excel = primeira_linha_dados_excel + i
@@ -364,9 +369,14 @@ def aplicar_resultado_no_excel_original(
             if nome_coluna not in df_resultado.columns:
                 continue
 
-            letra_coluna = mapa_colunas_destino[nome_coluna]
+            coluna_excel = mapa_colunas_destino[nome_coluna]
             valor = df_resultado.iloc[i][nome_coluna]
-            ws[f"{letra_coluna}{linha_excel}"] = valor
+
+            celula_destino = obter_celula_segura_para_escrita(ws, linha_excel, coluna_excel)
+            if celula_destino is None:
+                continue
+
+            celula_destino.value = valor
 
     output = io.BytesIO()
     wb.save(output)
