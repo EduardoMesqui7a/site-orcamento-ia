@@ -1,16 +1,15 @@
 import io
 import re
+import tempfile
 from typing import List, Optional
 
 import pandas as pd
 import streamlit as st
-from openpyxl import load_workbook
 from rapidfuzz import fuzz
-from sentence_transformers import SentenceTransformer
-from sklearn.neighbors import NearestNeighbors
+from sentence_transformers import SentenceTransformer, util
 from unidecode import unidecode
 
-st.set_page_config(page_title="Busca Semântica de Orçamento", layout="wide")
+st.set_page_config(page_title="Orçamento IA - VSN", layout="wide")
 
 MODELO_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 PESO_SEMANTICO = 0.70
@@ -100,84 +99,49 @@ def score_regras(busca_norm: str, descricao_norm: str) -> float:
             score += 0.20
 
     if "concreto" in busca_norm and "megapascal" in busca_norm:
-        if "concreto" in descricao_norm and any(
-            x in descricao_norm for x in ["megapascal", "resistencia caracteristica"]
-        ):
+        if "concreto" in descricao_norm and any(x in descricao_norm for x in ["megapascal", "resistencia caracteristica"]):
             score += 0.20
 
     return min(score, 1.0)
 
 
 def carregar_excel(uploaded_file, nome_aba: Optional[str], header_index: int) -> pd.DataFrame:
-    uploaded_file.seek(0)
     xls = pd.ExcelFile(uploaded_file)
     aba = nome_aba if nome_aba else xls.sheet_names[0]
-
-    uploaded_file.seek(0)
     df = pd.read_excel(uploaded_file, sheet_name=aba, header=header_index)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
-def gerar_embeddings_e_indice(df_base: pd.DataFrame, coluna_texto_base: str, modelo):
+def gerar_embeddings(df_base: pd.DataFrame, coluna_texto_base: str, modelo):
     textos = df_base[coluna_texto_base].fillna("").astype(str).tolist()
     textos_norm = [normalizar_texto(t) for t in textos]
-
-    embeddings = modelo.encode(
-        textos_norm,
-        convert_to_numpy=True,
-        normalize_embeddings=True
-    )
-
-    indice = NearestNeighbors(metric="cosine", algorithm="auto")
-    indice.fit(embeddings)
-
-    return textos_norm, embeddings, indice
+    embeddings = modelo.encode(textos_norm, convert_to_tensor=True, normalize_embeddings=True)
+    return textos_norm, embeddings
 
 
-def buscar_melhor_item(
-    texto_busca: str,
-    df_base: pd.DataFrame,
-    coluna_texto_base_norm: str,
-    embeddings,
-    indice_vetorial,
-    modelo,
-    top_k_vetorial: int = 25,
-):
+def buscar_melhor_item(texto_busca: str, df_base: pd.DataFrame, coluna_texto_base_norm: str, embeddings, modelo):
     busca_norm = normalizar_texto(texto_busca)
     if not busca_norm:
         return None
 
-    emb_busca = modelo.encode(
-        [busca_norm],
-        convert_to_numpy=True,
-        normalize_embeddings=True
-    )
-
-    n_vizinhos = min(top_k_vetorial, len(df_base))
-    distancias, indices = indice_vetorial.kneighbors(emb_busca, n_neighbors=n_vizinhos)
+    emb_busca = modelo.encode([busca_norm], convert_to_tensor=True, normalize_embeddings=True)
+    scores_semanticos = util.cos_sim(emb_busca, embeddings)[0].cpu().numpy()
 
     melhor_idx = None
     melhor_score = -1.0
     melhor_det = None
 
-    for pos, i in enumerate(indices[0]):
-        row = df_base.iloc[i]
+    for i, row in df_base.iterrows():
         texto_base_norm = row[coluna_texto_base_norm]
-
-        score_sem = 1.0 - float(distancias[0][pos])
+        score_sem = float(scores_semanticos[i])
         score_fuzzy = fuzz.token_set_ratio(busca_norm, texto_base_norm) / 100.0
         score_reg = score_regras(busca_norm, texto_base_norm)
-
-        score_final = (
-            PESO_SEMANTICO * score_sem +
-            PESO_FUZZY * score_fuzzy +
-            PESO_REGRAS * score_reg
-        )
+        score_final = PESO_SEMANTICO * score_sem + PESO_FUZZY * score_fuzzy + PESO_REGRAS * score_reg
 
         if score_final > melhor_score:
             melhor_score = score_final
-            melhor_idx = int(i)
+            melhor_idx = i
             melhor_det = {
                 "score_final": round(score_final, 4),
                 "score_semantico": round(score_sem, 4),
@@ -189,58 +153,6 @@ def buscar_melhor_item(
         return None
 
     return melhor_idx, melhor_det
-
-
-def eh_linha_de_titulo_ou_subtitulo(texto) -> bool:
-    if texto is None or str(texto).strip() == "":
-        return True
-
-    t = str(texto).strip()
-    t_norm = normalizar_texto(t)
-    palavras = t_norm.split()
-
-    if len(t_norm) <= 3:
-        return True
-
-    termos_genericos = {
-        "servicos preliminares",
-        "fundacoes",
-        "estrutura",
-        "superestrutura",
-        "arquitetura",
-        "instalacoes",
-        "instalacoes eletricas",
-        "instalacoes hidraulicas",
-        "urbanizacao",
-        "cobertura",
-        "revestimentos",
-        "esquadrias",
-        "pintura",
-        "demolicoes",
-        "demolicao",
-        "movimento de terra",
-        "infraestrutura",
-        "equipamentos",
-        "geral",
-        "administracao local",
-    }
-    if t_norm in termos_genericos:
-        return True
-
-    unidades = {"m", "m2", "m3", "kg", "un", "vb", "cj", "h", "mes"}
-    tem_numero = bool(re.search(r"\d", t_norm))
-    tem_unidade = any(u in palavras for u in unidades)
-
-    if len(palavras) <= 3 and not tem_numero and not tem_unidade:
-        return True
-
-    letras = [c for c in t if c.isalpha()]
-    if letras:
-        proporcao_maiuscula = sum(1 for c in letras if c.isupper()) / len(letras)
-        if proporcao_maiuscula > 0.8 and len(palavras) <= 5:
-            return True
-
-    return False
 
 
 def processar_preenchimento(
@@ -260,16 +172,55 @@ def processar_preenchimento(
     df_base_proc[coluna_texto_base] = df_base_proc[coluna_texto_base].fillna("").astype(str)
     df_base_proc["__texto_base_norm__"] = df_base_proc[coluna_texto_base].apply(normalizar_texto)
 
-    _, embeddings, indice_vetorial = gerar_embeddings_e_indice(df_base_proc, coluna_texto_base, modelo)
+    _, embeddings = gerar_embeddings(df_base_proc, coluna_texto_base, modelo)
 
     score_col = "IA_SCORE"
     match_col = "IA_DESCRICAO_ENCONTRADA"
     idx_col = "IA_LINHA_BASE"
     tipo_col = "IA_TIPO_LINHA"
 
-    for col in [score_col, match_col, idx_col, tipo_col]:
-        if col not in df_destino_proc.columns:
-            df_destino_proc[col] = None
+    if score_col not in df_destino_proc.columns:
+        df_destino_proc[score_col] = None
+    if match_col not in df_destino_proc.columns:
+        df_destino_proc[match_col] = None
+    if idx_col not in df_destino_proc.columns:
+        df_destino_proc[idx_col] = None
+    if tipo_col not in df_destino_proc.columns:
+        df_destino_proc[tipo_col] = None
+
+    def eh_linha_de_titulo_ou_subtitulo(texto) -> bool:
+        if texto is None or str(texto).strip() == "":
+            return True
+
+        t = str(texto).strip()
+        t_norm = normalizar_texto(t)
+        palavras = t_norm.split()
+
+        if len(t_norm) <= 3:
+            return True
+
+        termos_genericos = {
+            "servicos preliminares", "fundacoes", "estrutura", "superestrutura", "arquitetura",
+            "instalacoes", "instalacoes eletricas", "instalacoes hidraulicas", "urbanizacao",
+            "cobertura", "revestimentos", "esquadrias", "pintura", "demolicoes", "demolicao",
+            "movimento de terra", "infraestrutura", "equipamentos", "geral", "administracao local"
+        }
+        if t_norm in termos_genericos:
+            return True
+
+        unidades = {"m", "m2", "m3", "kg", "un", "vb", "cj", "h", "mes"}
+        tem_numero = bool(re.search(r"\d", t_norm))
+        tem_unidade = any(u in palavras for u in unidades)
+        if len(palavras) <= 3 and not tem_numero and not tem_unidade:
+            return True
+
+        letras = [c for c in t if c.isalpha()]
+        if letras:
+            proporcao_maiuscula = sum(1 for c in letras if c.isupper()) / len(letras)
+            if proporcao_maiuscula > 0.8 and len(palavras) <= 5:
+                return True
+
+        return False
 
     total = len(df_destino_proc)
     progresso = st.progress(0)
@@ -277,7 +228,6 @@ def processar_preenchimento(
 
     for i in range(total):
         busca = df_destino_proc.at[i, coluna_busca_destino] if coluna_busca_destino in df_destino_proc.columns else None
-
         if busca is None or str(busca).strip() == "":
             df_destino_proc.at[i, tipo_col] = "Vazia"
             progresso.progress((i + 1) / max(total, 1))
@@ -293,9 +243,7 @@ def processar_preenchimento(
             df_base=df_base_proc,
             coluna_texto_base_norm="__texto_base_norm__",
             embeddings=embeddings,
-            indice_vetorial=indice_vetorial,
             modelo=modelo,
-            top_k_vetorial=25,
         )
 
         if res is None:
@@ -304,11 +252,11 @@ def processar_preenchimento(
             continue
 
         idx_match, det = res
-
         if det["score_final"] < score_minimo:
             df_destino_proc.at[i, score_col] = det["score_final"]
             df_destino_proc.at[i, match_col] = "Confiança baixa"
             df_destino_proc.at[i, idx_col] = int(idx_match) + 2
+            df_destino_proc.at[i, tipo_col] = "Item"
             df_destino_proc.at[i, tipo_col] = "Item, confiança baixa"
             progresso.progress((i + 1) / max(total, 1))
             continue
@@ -319,7 +267,6 @@ def processar_preenchimento(
         df_destino_proc.at[i, score_col] = det["score_final"]
         df_destino_proc.at[i, match_col] = df_base_proc.at[idx_match, coluna_texto_base]
         df_destino_proc.at[i, idx_col] = int(idx_match) + 2
-        df_destino_proc.at[i, tipo_col] = "Item"
 
         status.info(f"Processando linha {i + 1} de {total}")
         progresso.progress((i + 1) / max(total, 1))
@@ -329,62 +276,15 @@ def processar_preenchimento(
     return df_destino_proc
 
 
-def obter_celula_segura_para_escrita(ws, linha: int, coluna: int):
-    for merged_range in ws.merged_cells.ranges:
-        if (
-            merged_range.min_row <= linha <= merged_range.max_row
-            and merged_range.min_col <= coluna <= merged_range.max_col
-        ):
-            if merged_range.min_row == merged_range.max_row == linha:
-                return ws.cell(row=merged_range.min_row, column=merged_range.min_col)
-            return None
-
-    return ws.cell(row=linha, column=coluna)
-
-
-def aplicar_resultado_no_excel_original(
-    uploaded_file,
-    nome_aba: str,
-    header_index: int,
-    df_original: pd.DataFrame,
-    df_resultado: pd.DataFrame,
-    colunas_destino_preencher: List[str],
-) -> bytes:
-    uploaded_file.seek(0)
-    wb = load_workbook(uploaded_file)
-    ws = wb[nome_aba] if nome_aba in wb.sheetnames else wb[wb.sheetnames[0]]
-
-    linha_cabecalho_excel = header_index + 1
-    primeira_linha_dados_excel = linha_cabecalho_excel + 1
-
-    mapa_colunas_destino = {}
-    for nome_coluna in colunas_destino_preencher:
-        indice_df = df_original.columns.get_loc(nome_coluna) + 1
-        mapa_colunas_destino[nome_coluna] = indice_df
-
-    for i in range(len(df_resultado)):
-        linha_excel = primeira_linha_dados_excel + i
-
-        for nome_coluna in colunas_destino_preencher:
-            if nome_coluna not in df_resultado.columns:
-                continue
-
-            coluna_excel = mapa_colunas_destino[nome_coluna]
-            valor = df_resultado.iloc[i][nome_coluna]
-
-            celula_destino = obter_celula_segura_para_escrita(ws, linha_excel, coluna_excel)
-            if celula_destino is None:
-                continue
-
-            celula_destino.value = valor
-
+def dataframe_para_excel_bytes(df: pd.DataFrame, nome_aba: str = "Resultado") -> bytes:
     output = io.BytesIO()
-    wb.save(output)
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=nome_aba)
     output.seek(0)
     return output.getvalue()
 
 
-st.title("Busca Semântica para Orçamento")
+st.title("Orçamento IA - VSN")
 st.caption("Importe a base de dados e a planilha a preencher, escolha as colunas e gere o arquivo preenchido.")
 
 with st.sidebar:
@@ -406,10 +306,7 @@ with col2:
 
 if arquivo_base and arquivo_destino:
     try:
-        arquivo_base.seek(0)
         xls_base = pd.ExcelFile(arquivo_base)
-
-        arquivo_destino.seek(0)
         xls_dest = pd.ExcelFile(arquivo_destino)
 
         col3, col4 = st.columns(2)
@@ -435,7 +332,7 @@ if arquivo_base and arquivo_destino:
             coluna_busca_destino = st.selectbox(
                 "Coluna da planilha de destino usada como busca",
                 options=df_destino.columns.tolist(),
-                index=0,
+                index=df_destino.columns.tolist().index("G") if "G" in df_destino.columns else 0,
             )
 
         st.markdown("### Colunas da base que deseja obter")
@@ -464,7 +361,6 @@ if arquivo_base and arquivo_destino:
         else:
             st.divider()
             st.subheader("4. Prévia")
-
             p1, p2 = st.columns(2)
             with p1:
                 st.write("Base")
@@ -487,15 +383,7 @@ if arquivo_base and arquivo_destino:
                 st.success("Processamento concluído.")
                 st.dataframe(resultado.head(50), use_container_width=True)
 
-                excel_bytes = aplicar_resultado_no_excel_original(
-                    uploaded_file=arquivo_destino,
-                    nome_aba=aba_dest,
-                    header_index=int(header_dest) - 1,
-                    df_original=df_destino,
-                    df_resultado=resultado,
-                    colunas_destino_preencher=colunas_destino_preencher,
-                )
-
+                excel_bytes = dataframe_para_excel_bytes(resultado, nome_aba=aba_dest)
                 st.download_button(
                     label="Baixar planilha preenchida",
                     data=excel_bytes,
@@ -507,3 +395,5 @@ if arquivo_base and arquivo_destino:
         st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.info("Importe os dois arquivos para habilitar o mapeamento e o preenchimento automático.")
+
+
