@@ -256,7 +256,7 @@ def processar_preenchimento(
             df_destino_proc.at[i, score_col] = det["score_final"]
             df_destino_proc.at[i, match_col] = "Confiança baixa"
             df_destino_proc.at[i, idx_col] = int(idx_match) + 2
-        df_destino_proc.at[i, tipo_col] = "Item"
+            df_destino_proc.at[i, tipo_col] = "Item"
             df_destino_proc.at[i, tipo_col] = "Item, confiança baixa"
             progresso.progress((i + 1) / max(total, 1))
             continue
@@ -395,4 +395,5 @@ if arquivo_base and arquivo_destino:
         st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.info("Importe os dois arquivos para habilitar o mapeamento e o preenchimento automático.")
+
 
