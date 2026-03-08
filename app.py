@@ -177,6 +177,7 @@ def processar_preenchimento(
     score_col = "IA_SCORE"
     match_col = "IA_DESCRICAO_ENCONTRADA"
     idx_col = "IA_LINHA_BASE"
+    tipo_col = "IA_TIPO_LINHA"
 
     if score_col not in df_destino_proc.columns:
         df_destino_proc[score_col] = None
@@ -184,6 +185,42 @@ def processar_preenchimento(
         df_destino_proc[match_col] = None
     if idx_col not in df_destino_proc.columns:
         df_destino_proc[idx_col] = None
+    if tipo_col not in df_destino_proc.columns:
+        df_destino_proc[tipo_col] = None
+
+    def eh_linha_de_titulo_ou_subtitulo(texto) -> bool:
+        if texto is None or str(texto).strip() == "":
+            return True
+
+        t = str(texto).strip()
+        t_norm = normalizar_texto(t)
+        palavras = t_norm.split()
+
+        if len(t_norm) <= 3:
+            return True
+
+        termos_genericos = {
+            "servicos preliminares", "fundacoes", "estrutura", "superestrutura", "arquitetura",
+            "instalacoes", "instalacoes eletricas", "instalacoes hidraulicas", "urbanizacao",
+            "cobertura", "revestimentos", "esquadrias", "pintura", "demolicoes", "demolicao",
+            "movimento de terra", "infraestrutura", "equipamentos", "geral", "administracao local"
+        }
+        if t_norm in termos_genericos:
+            return True
+
+        unidades = {"m", "m2", "m3", "kg", "un", "vb", "cj", "h", "mes"}
+        tem_numero = bool(re.search(r"\d", t_norm))
+        tem_unidade = any(u in palavras for u in unidades)
+        if len(palavras) <= 3 and not tem_numero and not tem_unidade:
+            return True
+
+        letras = [c for c in t if c.isalpha()]
+        if letras:
+            proporcao_maiuscula = sum(1 for c in letras if c.isupper()) / len(letras)
+            if proporcao_maiuscula > 0.8 and len(palavras) <= 5:
+                return True
+
+        return False
 
     total = len(df_destino_proc)
     progresso = st.progress(0)
@@ -192,6 +229,12 @@ def processar_preenchimento(
     for i in range(total):
         busca = df_destino_proc.at[i, coluna_busca_destino] if coluna_busca_destino in df_destino_proc.columns else None
         if busca is None or str(busca).strip() == "":
+            df_destino_proc.at[i, tipo_col] = "Vazia"
+            progresso.progress((i + 1) / max(total, 1))
+            continue
+
+        if eh_linha_de_titulo_ou_subtitulo(busca):
+            df_destino_proc.at[i, tipo_col] = "Título/Subtítulo"
             progresso.progress((i + 1) / max(total, 1))
             continue
 
@@ -204,6 +247,7 @@ def processar_preenchimento(
         )
 
         if res is None:
+            df_destino_proc.at[i, tipo_col] = "Sem correspondência"
             progresso.progress((i + 1) / max(total, 1))
             continue
 
@@ -212,6 +256,8 @@ def processar_preenchimento(
             df_destino_proc.at[i, score_col] = det["score_final"]
             df_destino_proc.at[i, match_col] = "Confiança baixa"
             df_destino_proc.at[i, idx_col] = int(idx_match) + 2
+        df_destino_proc.at[i, tipo_col] = "Item"
+            df_destino_proc.at[i, tipo_col] = "Item, confiança baixa"
             progresso.progress((i + 1) / max(total, 1))
             continue
 
@@ -349,14 +395,4 @@ if arquivo_base and arquivo_destino:
         st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.info("Importe os dois arquivos para habilitar o mapeamento e o preenchimento automático.")
-
-st.divider()
-st.markdown(
-    """
-### Preencha passo a passo para habilitar a próxima etapa
-```
-"""
-)
-
-
 
