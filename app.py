@@ -1,20 +1,21 @@
 import io
 import re
-import tempfile
 from typing import List, Optional
 
 import pandas as pd
 import streamlit as st
 from rapidfuzz import fuzz
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import SentenceTransformer
+from sklearn.neighbors import NearestNeighbors
 from unidecode import unidecode
 
-st.set_page_config(page_title="Orçamento IA - VSN", layout="wide")
+st.set_page_config(page_title="Orçamento IA, TESTEEE", layout="wide")
 
 MODELO_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 PESO_SEMANTICO = 0.70
 PESO_FUZZY = 0.20
 PESO_REGRAS = 0.10
+TOP_K_CANDIDATOS = 30
 
 
 @st.cache_resource
@@ -40,7 +41,7 @@ def normalizar_texto(texto: str) -> str:
         "parede": "vedacao parede fechamento",
         "aco": "aco armadura",
         "armacao": "armadura aco",
-        "forma": "forma forma madeira compensado",
+        "forma": "forma madeira compensado",
         "tubo": "tubulacao",
         "tubos": "tubulacao",
         "eletroduto": "tubulacao eletrica conduite",
@@ -99,49 +100,129 @@ def score_regras(busca_norm: str, descricao_norm: str) -> float:
             score += 0.20
 
     if "concreto" in busca_norm and "megapascal" in busca_norm:
-        if "concreto" in descricao_norm and any(x in descricao_norm for x in ["megapascal", "resistencia caracteristica"]):
+        if "concreto" in descricao_norm and any(
+            x in descricao_norm for x in ["megapascal", "resistencia caracteristica"]
+        ):
             score += 0.20
 
     return min(score, 1.0)
 
 
+def eh_linha_de_titulo_ou_subtitulo(texto) -> bool:
+    if texto is None or str(texto).strip() == "":
+        return True
+
+    t = str(texto).strip()
+    t_norm = normalizar_texto(t)
+    palavras = t_norm.split()
+
+    if len(t_norm) <= 3:
+        return True
+
+    termos_genericos = {
+        "servicos preliminares", "fundacoes", "estrutura", "superestrutura", "arquitetura",
+        "instalacoes", "instalacoes eletricas", "instalacoes hidraulicas", "urbanizacao",
+        "cobertura", "revestimentos", "esquadrias", "pintura", "demolicoes", "demolicao",
+        "movimento de terra", "infraestrutura", "equipamentos", "geral", "administracao local"
+    }
+    if t_norm in termos_genericos:
+        return True
+
+    unidades = {"m", "m2", "m3", "kg", "un", "vb", "cj", "h", "mes"}
+    tem_numero = bool(re.search(r"\d", t_norm))
+    tem_unidade = any(u in palavras for u in unidades)
+    if len(palavras) <= 3 and not tem_numero and not tem_unidade:
+        return True
+
+    letras = [c for c in t if c.isalpha()]
+    if letras:
+        proporcao_maiuscula = sum(1 for c in letras if c.isupper()) / len(letras)
+        if proporcao_maiuscula > 0.8 and len(palavras) <= 5:
+            return True
+
+    return False
+
+
 def carregar_excel(uploaded_file, nome_aba: Optional[str], header_index: int) -> pd.DataFrame:
+    uploaded_file.seek(0)
     xls = pd.ExcelFile(uploaded_file)
     aba = nome_aba if nome_aba else xls.sheet_names[0]
+
+    uploaded_file.seek(0)
     df = pd.read_excel(uploaded_file, sheet_name=aba, header=header_index)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
-def gerar_embeddings(df_base: pd.DataFrame, coluna_texto_base: str, modelo):
-    textos = df_base[coluna_texto_base].fillna("").astype(str).tolist()
-    textos_norm = [normalizar_texto(t) for t in textos]
-    embeddings = modelo.encode(textos_norm, convert_to_tensor=True, normalize_embeddings=True)
-    return textos_norm, embeddings
+@st.cache_data(show_spinner=False)
+def preparar_base_para_busca(df_base: pd.DataFrame, coluna_texto_base: str):
+    modelo = carregar_modelo()
+
+    df_base_proc = df_base.copy()
+    df_base_proc[coluna_texto_base] = df_base_proc[coluna_texto_base].fillna("").astype(str)
+    df_base_proc["__texto_base_norm__"] = df_base_proc[coluna_texto_base].map(normalizar_texto)
+
+    textos_norm = df_base_proc["__texto_base_norm__"].tolist()
+
+    embeddings = modelo.encode(
+        textos_norm,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+
+    indice = NearestNeighbors(metric="cosine", algorithm="auto")
+    indice.fit(embeddings)
+
+    return df_base_proc, embeddings, indice
 
 
-def buscar_melhor_item(texto_busca: str, df_base: pd.DataFrame, coluna_texto_base_norm: str, embeddings, modelo):
+def buscar_melhor_item(
+    texto_busca: str,
+    df_base_proc: pd.DataFrame,
+    embeddings,
+    indice,
+    top_k_candidatos: int = TOP_K_CANDIDATOS,
+):
+    modelo = carregar_modelo()
+
     busca_norm = normalizar_texto(texto_busca)
     if not busca_norm:
         return None
 
-    emb_busca = modelo.encode([busca_norm], convert_to_tensor=True, normalize_embeddings=True)
-    scores_semanticos = util.cos_sim(emb_busca, embeddings)[0].cpu().numpy()
+    emb_busca = modelo.encode(
+        [busca_norm],
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+
+    k = min(top_k_candidatos, len(df_base_proc))
+    distancias, indices = indice.kneighbors(emb_busca, n_neighbors=k)
+
+    melhores_indices = indices[0]
+    melhores_distancias = distancias[0]
 
     melhor_idx = None
     melhor_score = -1.0
     melhor_det = None
 
-    for i, row in df_base.iterrows():
-        texto_base_norm = row[coluna_texto_base_norm]
-        score_sem = float(scores_semanticos[i])
+    for pos, idx in enumerate(melhores_indices):
+        texto_base_norm = df_base_proc.iloc[idx]["__texto_base_norm__"]
+
+        score_sem = 1.0 - float(melhores_distancias[pos])
         score_fuzzy = fuzz.token_set_ratio(busca_norm, texto_base_norm) / 100.0
         score_reg = score_regras(busca_norm, texto_base_norm)
-        score_final = PESO_SEMANTICO * score_sem + PESO_FUZZY * score_fuzzy + PESO_REGRAS * score_reg
+
+        score_final = (
+            PESO_SEMANTICO * score_sem +
+            PESO_FUZZY * score_fuzzy +
+            PESO_REGRAS * score_reg
+        )
 
         if score_final > melhor_score:
             melhor_score = score_final
-            melhor_idx = i
+            melhor_idx = int(idx)
             melhor_det = {
                 "score_final": round(score_final, 4),
                 "score_semantico": round(score_sem, 4),
@@ -164,70 +245,26 @@ def processar_preenchimento(
     coluna_texto_base: str,
     score_minimo: float,
 ):
-    modelo = carregar_modelo()
-
-    df_base_proc = df_base.copy()
     df_destino_proc = df_destino.copy()
 
-    df_base_proc[coluna_texto_base] = df_base_proc[coluna_texto_base].fillna("").astype(str)
-    df_base_proc["__texto_base_norm__"] = df_base_proc[coluna_texto_base].apply(normalizar_texto)
-
-    _, embeddings = gerar_embeddings(df_base_proc, coluna_texto_base, modelo)
+    df_base_proc, embeddings, indice = preparar_base_para_busca(df_base, coluna_texto_base)
 
     score_col = "IA_SCORE"
     match_col = "IA_DESCRICAO_ENCONTRADA"
     idx_col = "IA_LINHA_BASE"
     tipo_col = "IA_TIPO_LINHA"
 
-    if score_col not in df_destino_proc.columns:
-        df_destino_proc[score_col] = None
-    if match_col not in df_destino_proc.columns:
-        df_destino_proc[match_col] = None
-    if idx_col not in df_destino_proc.columns:
-        df_destino_proc[idx_col] = None
-    if tipo_col not in df_destino_proc.columns:
-        df_destino_proc[tipo_col] = None
-
-    def eh_linha_de_titulo_ou_subtitulo(texto) -> bool:
-        if texto is None or str(texto).strip() == "":
-            return True
-
-        t = str(texto).strip()
-        t_norm = normalizar_texto(t)
-        palavras = t_norm.split()
-
-        if len(t_norm) <= 3:
-            return True
-
-        termos_genericos = {
-            "servicos preliminares", "fundacoes", "estrutura", "superestrutura", "arquitetura",
-            "instalacoes", "instalacoes eletricas", "instalacoes hidraulicas", "urbanizacao",
-            "cobertura", "revestimentos", "esquadrias", "pintura", "demolicoes", "demolicao",
-            "movimento de terra", "infraestrutura", "equipamentos", "geral", "administracao local"
-        }
-        if t_norm in termos_genericos:
-            return True
-
-        unidades = {"m", "m2", "m3", "kg", "un", "vb", "cj", "h", "mes"}
-        tem_numero = bool(re.search(r"\d", t_norm))
-        tem_unidade = any(u in palavras for u in unidades)
-        if len(palavras) <= 3 and not tem_numero and not tem_unidade:
-            return True
-
-        letras = [c for c in t if c.isalpha()]
-        if letras:
-            proporcao_maiuscula = sum(1 for c in letras if c.isupper()) / len(letras)
-            if proporcao_maiuscula > 0.8 and len(palavras) <= 5:
-                return True
-
-        return False
+    for col in [score_col, match_col, idx_col, tipo_col]:
+        if col not in df_destino_proc.columns:
+            df_destino_proc[col] = None
 
     total = len(df_destino_proc)
     progresso = st.progress(0)
     status = st.empty()
 
-    for i in range(total):
-        busca = df_destino_proc.at[i, coluna_busca_destino] if coluna_busca_destino in df_destino_proc.columns else None
+    buscas = df_destino_proc[coluna_busca_destino].tolist() if coluna_busca_destino in df_destino_proc.columns else []
+
+    for i, busca in enumerate(buscas):
         if busca is None or str(busca).strip() == "":
             df_destino_proc.at[i, tipo_col] = "Vazia"
             progresso.progress((i + 1) / max(total, 1))
@@ -240,10 +277,10 @@ def processar_preenchimento(
 
         res = buscar_melhor_item(
             texto_busca=str(busca),
-            df_base=df_base_proc,
-            coluna_texto_base_norm="__texto_base_norm__",
+            df_base_proc=df_base_proc,
             embeddings=embeddings,
-            modelo=modelo,
+            indice=indice,
+            top_k_candidatos=TOP_K_CANDIDATOS,
         )
 
         if res is None:
@@ -252,23 +289,25 @@ def processar_preenchimento(
             continue
 
         idx_match, det = res
+
         if det["score_final"] < score_minimo:
             df_destino_proc.at[i, score_col] = det["score_final"]
             df_destino_proc.at[i, match_col] = "Confiança baixa"
             df_destino_proc.at[i, idx_col] = int(idx_match) + 2
-            df_destino_proc.at[i, tipo_col] = "Item"
             df_destino_proc.at[i, tipo_col] = "Item, confiança baixa"
             progresso.progress((i + 1) / max(total, 1))
             continue
 
         for col_base, col_dest in zip(colunas_base_retorno, colunas_destino_preencher):
-            df_destino_proc.at[i, col_dest] = df_base_proc.at[idx_match, col_base]
+            df_destino_proc.at[i, col_dest] = df_base_proc.iloc[idx_match][col_base]
 
         df_destino_proc.at[i, score_col] = det["score_final"]
-        df_destino_proc.at[i, match_col] = df_base_proc.at[idx_match, coluna_texto_base]
+        df_destino_proc.at[i, match_col] = df_base_proc.iloc[idx_match][coluna_texto_base]
         df_destino_proc.at[i, idx_col] = int(idx_match) + 2
+        df_destino_proc.at[i, tipo_col] = "Item"
 
-        status.info(f"Processando linha {i + 1} de {total}")
+        if i % 10 == 0 or i == total - 1:
+            status.info(f"Processando linha {i + 1} de {total}")
         progresso.progress((i + 1) / max(total, 1))
 
     progresso.empty()
@@ -284,7 +323,7 @@ def dataframe_para_excel_bytes(df: pd.DataFrame, nome_aba: str = "Resultado") ->
     return output.getvalue()
 
 
-st.title("Orçamento IA - VSN")
+st.title("Orçamento IA, VSN")
 st.caption("Importe a base de dados e a planilha a preencher, escolha as colunas e gere o arquivo preenchido.")
 
 with st.sidebar:
@@ -292,7 +331,10 @@ with st.sidebar:
     score_minimo = st.slider("Score mínimo para preencher", 0.0, 1.0, 0.35, 0.01)
     header_base = st.number_input("Linha do cabeçalho da base", min_value=1, value=3, step=1)
     header_dest = st.number_input("Linha do cabeçalho da planilha a preencher", min_value=1, value=1, step=1)
-    st.markdown("Sugestão: se a base tem cabeçalho na linha 3 do Excel, informe 3.")
+    st.number_input("Qtd. de candidatos por busca", min_value=5, max_value=100, value=30, step=5, key="topk_ui")
+    st.markdown("Sugestão, se a base tem cabeçalho na linha 3 do Excel, informe 3.")
+
+TOP_K_CANDIDATOS = st.session_state["topk_ui"]
 
 col1, col2 = st.columns(2)
 
@@ -306,7 +348,10 @@ with col2:
 
 if arquivo_base and arquivo_destino:
     try:
+        arquivo_base.seek(0)
         xls_base = pd.ExcelFile(arquivo_base)
+
+        arquivo_destino.seek(0)
         xls_dest = pd.ExcelFile(arquivo_destino)
 
         col3, col4 = st.columns(2)
@@ -395,5 +440,3 @@ if arquivo_base and arquivo_destino:
         st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.info("Importe os dois arquivos para habilitar o mapeamento e o preenchimento automático.")
-
-
