@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.neighbors import NearestNeighbors
 from unidecode import unidecode
 
-st.set_page_config(page_title="Orçamento IA, VSN", layout="wide")
+st.set_page_config(page_title="Orçamento IA - VSN", layout="wide")
 
 MODELO_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 PESO_SEMANTICO = 0.70
@@ -323,16 +323,16 @@ def dataframe_para_excel_bytes(df: pd.DataFrame, nome_aba: str = "Resultado") ->
     return output.getvalue()
 
 
-st.title("Orçamento IA, VSN")
+st.title("Orçamento IA - VSN")
 st.caption("Importe a base de dados e a planilha a preencher, escolha as colunas e gere o arquivo preenchido.")
 
 with st.sidebar:
     st.header("Configurações")
     score_minimo = st.slider("Score mínimo para preencher", 0.0, 1.0, 0.35, 0.01)
-    header_base = st.number_input("Linha do cabeçalho da base", min_value=1, value=3, step=1)
+    header_base = st.number_input("Linha do cabeçalho da base", min_value=1, value=1, step=1)
     header_dest = st.number_input("Linha do cabeçalho da planilha a preencher", min_value=1, value=1, step=1)
+    st.markdown("Informação: Se a base tem cabeçalho na linha 3 do Excel, informe 3.")
     st.number_input("Qtd. de candidatos por busca", min_value=5, max_value=100, value=30, step=5, key="topk_ui")
-    st.markdown("Sugestão, se a base tem cabeçalho na linha 3 do Excel, informe 3.")
 
 TOP_K_CANDIDATOS = st.session_state["topk_ui"]
 
@@ -440,4 +440,3 @@ if arquivo_base and arquivo_destino:
         st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.info("Importe os dois arquivos para habilitar o mapeamento e o preenchimento automático.")
-
