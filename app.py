@@ -10,7 +10,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.neighbors import NearestNeighbors
 from unidecode import unidecode
 
-st.set_page_config(page_title="Orçamento IA, VSN", layout="wide")
+st.set_page_config(page_title="Orçamento IA - VSN", layout="wide")
 
 MODELO_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 PESO_SEMANTICO = 0.70
@@ -291,6 +291,10 @@ def aplicar_resultado_no_excel_original(
         indice_df = df_original.columns.get_loc(nome_coluna) + 1
         mapa_colunas_destino[nome_coluna] = indice_df
 
+    desc_base_col = "DESCRIÇÃO BASE IA"
+    coluna_nova_excel = ws.max_column + 1
+    ws.cell(row=linha_cabecalho_excel, column=coluna_nova_excel).value = desc_base_col
+
     for i in range(len(df_resultado)):
         linha_excel = primeira_linha_dados_excel + i
 
@@ -306,6 +310,9 @@ def aplicar_resultado_no_excel_original(
                 continue
 
             celula_destino.value = valor
+
+        if desc_base_col in df_resultado.columns:
+            ws.cell(row=linha_excel, column=coluna_nova_excel).value = df_resultado.iloc[i][desc_base_col]
 
     output = io.BytesIO()
     wb.save(output)
@@ -325,26 +332,32 @@ def processar_preenchimento(
 ):
     df_destino_proc = df_destino.copy()
 
-    df_base_proc, embeddings, indice = preparar_base_para_busca(df_base, coluna_texto_base)
-
     score_col = "IA_SCORE"
     match_col = "IA_DESCRICAO_ENCONTRADA"
     idx_col = "IA_LINHA_BASE"
     tipo_col = "IA_TIPO_LINHA"
+    desc_base_col = "DESCRIÇÃO BASE IA"
 
-    for col in [score_col, match_col, idx_col, tipo_col]:
+    for col in [score_col, match_col, idx_col, tipo_col, desc_base_col]:
         if col not in df_destino_proc.columns:
             df_destino_proc[col] = None
 
+    status = st.empty()
+    progresso = st.progress(0)
+
+    status.info("Em processamento. Analisando a base de dados e preparando a busca semântica.")
+    df_base_proc, embeddings, indice = preparar_base_para_busca(df_base, coluna_texto_base)
+    progresso.progress(0.10)
+
     if coluna_busca_destino not in df_destino_proc.columns:
+        status.warning("A coluna de busca não foi encontrada na planilha de destino.")
+        progresso.empty()
         return df_destino_proc
 
     total = len(df_destino_proc)
-    progresso = st.progress(0)
-    status = st.empty()
-
     buscas_originais = df_destino_proc[coluna_busca_destino].tolist()
 
+    status.info("Em processamento. Analisando a planilha de destino e separando as buscas válidas.")
     mapa_buscas_validas: Dict[str, str] = {}
     for busca in buscas_originais:
         if busca is None or str(busca).strip() == "":
@@ -358,78 +371,86 @@ def processar_preenchimento(
             mapa_buscas_validas[busca_str] = busca_norm
 
     buscas_norm_unicas = list(set(mapa_buscas_validas.values()))
+    progresso.progress(0.25)
 
-    status.info("Gerando resultados das buscas únicas")
+    status.info("Em processamento. Calculando as melhores correspondências da base de dados.")
     resultados_unicos = buscar_melhor_item_em_lote(
         buscas_norm_unicas=buscas_norm_unicas,
         df_base_proc=df_base_proc,
         indice=indice,
         top_k_candidatos=top_k_candidatos,
     )
+    progresso.progress(0.55)
 
     cache_busca_original: Dict[str, Optional[Tuple[int, dict]]] = {}
     for busca_original, busca_norm in mapa_buscas_validas.items():
         cache_busca_original[busca_original] = resultados_unicos.get(busca_norm)
 
+    status.info("Em processamento. Preenchendo os dados na planilha de destino.")
+
     for i, busca in enumerate(buscas_originais):
         if busca is None or str(busca).strip() == "":
             df_destino_proc.at[i, tipo_col] = "Vazia"
             if i % 25 == 0 or i == total - 1:
-                progresso.progress((i + 1) / max(total, 1))
+                progresso.progress(0.55 + 0.45 * ((i + 1) / max(total, 1)))
             continue
 
         if eh_linha_de_titulo_ou_subtitulo(busca):
             df_destino_proc.at[i, tipo_col] = "Título/Subtítulo"
             if i % 25 == 0 or i == total - 1:
-                progresso.progress((i + 1) / max(total, 1))
+                progresso.progress(0.55 + 0.45 * ((i + 1) / max(total, 1)))
             continue
 
         res = cache_busca_original.get(str(busca))
 
         if res is None:
             df_destino_proc.at[i, tipo_col] = "Sem correspondência"
+            df_destino_proc.at[i, desc_base_col] = "Sem correspondência"
             if i % 25 == 0 or i == total - 1:
-                progresso.progress((i + 1) / max(total, 1))
+                progresso.progress(0.55 + 0.45 * ((i + 1) / max(total, 1)))
             continue
 
         idx_match, det = res
+        descricao_base = df_base_proc.iloc[idx_match][coluna_texto_base]
 
         if det["score_final"] < score_minimo:
             df_destino_proc.at[i, score_col] = det["score_final"]
             df_destino_proc.at[i, match_col] = "Confiança baixa"
             df_destino_proc.at[i, idx_col] = int(idx_match) + 2
             df_destino_proc.at[i, tipo_col] = "Item, confiança baixa"
+            df_destino_proc.at[i, desc_base_col] = descricao_base
             if i % 25 == 0 or i == total - 1:
-                progresso.progress((i + 1) / max(total, 1))
+                progresso.progress(0.55 + 0.45 * ((i + 1) / max(total, 1)))
             continue
 
         for col_base, col_dest in zip(colunas_base_retorno, colunas_destino_preencher):
             df_destino_proc.at[i, col_dest] = df_base_proc.iloc[idx_match][col_base]
 
         df_destino_proc.at[i, score_col] = det["score_final"]
-        df_destino_proc.at[i, match_col] = df_base_proc.iloc[idx_match][coluna_texto_base]
+        df_destino_proc.at[i, match_col] = descricao_base
         df_destino_proc.at[i, idx_col] = int(idx_match) + 2
         df_destino_proc.at[i, tipo_col] = "Item"
+        df_destino_proc.at[i, desc_base_col] = descricao_base
 
         if i % 25 == 0 or i == total - 1:
-            status.info(f"Processando linha {i + 1} de {total}")
-            progresso.progress((i + 1) / max(total, 1))
+            status.info(f"Em processamento. Preenchendo os dados na planilha de destino. Linha {i + 1} de {total}.")
+            progresso.progress(0.55 + 0.45 * ((i + 1) / max(total, 1)))
 
-    progresso.empty()
-    status.empty()
+    progresso.progress(1.0)
+    status.success("Processamento concluído. Planilha analisada e dados preenchidos.")
     return df_destino_proc
 
 
-st.title("Orçamento IA, VSN")
+st.title("Orçamento IA - VSN")
 st.caption("Importe a base de dados e a planilha a preencher, escolha as colunas e gere o arquivo preenchido.")
 
 with st.sidebar:
     st.header("Configurações")
     score_minimo = st.slider("Score mínimo para preencher", 0.0, 1.0, 0.35, 0.01)
-    header_base = st.number_input("Linha do cabeçalho da base", min_value=1, value=1, step=1)
+    header_base = st.number_input("Linha do cabeçalho da base", min_value=1, value=3, step=1)
     header_dest = st.number_input("Linha do cabeçalho da planilha a preencher", min_value=1, value=1, step=1)
-    st.markdown("Sugestão, se a base tem cabeçalho na linha 3 do Excel, informe 3.")
     top_k_candidatos = st.number_input("Qtd. de candidatos por busca", min_value=5, max_value=100, value=30, step=5)
+    st.markdown("Sugestão, se a base tem cabeçalho na linha 3 do Excel, informe 3.")
 
 col1, col2 = st.columns(2)
 
@@ -545,5 +566,3 @@ if arquivo_base and arquivo_destino:
         st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.info("Importe os dois arquivos para habilitar o mapeamento e o preenchimento automático.")
-
-
