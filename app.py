@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.neighbors import NearestNeighbors
 from unidecode import unidecode
 
-st.set_page_config(page_title="Orçamento IA, TESTEEE", layout="wide")
+st.set_page_config(page_title="Orçamento IA, VSN", layout="wide")
 
 MODELO_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 PESO_SEMANTICO = 0.70
@@ -440,3 +440,4 @@ if arquivo_base and arquivo_destino:
         st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.info("Importe os dois arquivos para habilitar o mapeamento e o preenchimento automático.")
+
