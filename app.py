@@ -1,21 +1,21 @@
 import io
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
 from rapidfuzz import fuzz
 from sentence_transformers import SentenceTransformer
 from sklearn.neighbors import NearestNeighbors
 from unidecode import unidecode
 
-st.set_page_config(page_title="Orçamento IA - VSN", layout="wide")
+st.set_page_config(page_title="Orçamento IA, VSN", layout="wide")
 
 MODELO_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 PESO_SEMANTICO = 0.70
 PESO_FUZZY = 0.20
 PESO_REGRAS = 0.10
-TOP_K_CANDIDATOS = 30
 
 
 @st.cache_resource
@@ -120,10 +120,26 @@ def eh_linha_de_titulo_ou_subtitulo(texto) -> bool:
         return True
 
     termos_genericos = {
-        "servicos preliminares", "fundacoes", "estrutura", "superestrutura", "arquitetura",
-        "instalacoes", "instalacoes eletricas", "instalacoes hidraulicas", "urbanizacao",
-        "cobertura", "revestimentos", "esquadrias", "pintura", "demolicoes", "demolicao",
-        "movimento de terra", "infraestrutura", "equipamentos", "geral", "administracao local"
+        "servicos preliminares",
+        "fundacoes",
+        "estrutura",
+        "superestrutura",
+        "arquitetura",
+        "instalacoes",
+        "instalacoes eletricas",
+        "instalacoes hidraulicas",
+        "urbanizacao",
+        "cobertura",
+        "revestimentos",
+        "esquadrias",
+        "pintura",
+        "demolicoes",
+        "demolicao",
+        "movimento de terra",
+        "infraestrutura",
+        "equipamentos",
+        "geral",
+        "administracao local",
     }
     if t_norm in termos_genericos:
         return True
@@ -131,6 +147,7 @@ def eh_linha_de_titulo_ou_subtitulo(texto) -> bool:
     unidades = {"m", "m2", "m3", "kg", "un", "vb", "cj", "h", "mes"}
     tem_numero = bool(re.search(r"\d", t_norm))
     tem_unidade = any(u in palavras for u in unidades)
+
     if len(palavras) <= 3 and not tem_numero and not tem_unidade:
         return True
 
@@ -169,6 +186,7 @@ def preparar_base_para_busca(df_base: pd.DataFrame, coluna_texto_base: str):
         convert_to_numpy=True,
         normalize_embeddings=True,
         show_progress_bar=False,
+        batch_size=128,
     )
 
     indice = NearestNeighbors(metric="cosine", algorithm="auto")
@@ -177,63 +195,122 @@ def preparar_base_para_busca(df_base: pd.DataFrame, coluna_texto_base: str):
     return df_base_proc, embeddings, indice
 
 
-def buscar_melhor_item(
-    texto_busca: str,
+def buscar_melhor_item_em_lote(
+    buscas_norm_unicas: List[str],
     df_base_proc: pd.DataFrame,
-    embeddings,
     indice,
-    top_k_candidatos: int = TOP_K_CANDIDATOS,
-):
+    top_k_candidatos: int,
+) -> Dict[str, Optional[Tuple[int, dict]]]:
     modelo = carregar_modelo()
 
-    busca_norm = normalizar_texto(texto_busca)
-    if not busca_norm:
-        return None
+    if not buscas_norm_unicas:
+        return {}
 
-    emb_busca = modelo.encode(
-        [busca_norm],
+    emb_buscas = modelo.encode(
+        buscas_norm_unicas,
         convert_to_numpy=True,
         normalize_embeddings=True,
         show_progress_bar=False,
+        batch_size=128,
     )
 
     k = min(top_k_candidatos, len(df_base_proc))
-    distancias, indices = indice.kneighbors(emb_busca, n_neighbors=k)
+    distancias_lote, indices_lote = indice.kneighbors(emb_buscas, n_neighbors=k)
 
-    melhores_indices = indices[0]
-    melhores_distancias = distancias[0]
+    resultados = {}
 
-    melhor_idx = None
-    melhor_score = -1.0
-    melhor_det = None
+    for pos_busca, busca_norm in enumerate(buscas_norm_unicas):
+        melhores_indices = indices_lote[pos_busca]
+        melhores_distancias = distancias_lote[pos_busca]
 
-    for pos, idx in enumerate(melhores_indices):
-        texto_base_norm = df_base_proc.iloc[idx]["__texto_base_norm__"]
+        melhor_idx = None
+        melhor_score = -1.0
+        melhor_det = None
 
-        score_sem = 1.0 - float(melhores_distancias[pos])
-        score_fuzzy = fuzz.token_set_ratio(busca_norm, texto_base_norm) / 100.0
-        score_reg = score_regras(busca_norm, texto_base_norm)
+        for pos_cand, idx_base in enumerate(melhores_indices):
+            texto_base_norm = df_base_proc.iloc[idx_base]["__texto_base_norm__"]
 
-        score_final = (
-            PESO_SEMANTICO * score_sem +
-            PESO_FUZZY * score_fuzzy +
-            PESO_REGRAS * score_reg
-        )
+            score_sem = 1.0 - float(melhores_distancias[pos_cand])
+            score_fuzzy = fuzz.token_set_ratio(busca_norm, texto_base_norm) / 100.0
+            score_reg = score_regras(busca_norm, texto_base_norm)
 
-        if score_final > melhor_score:
-            melhor_score = score_final
-            melhor_idx = int(idx)
-            melhor_det = {
-                "score_final": round(score_final, 4),
-                "score_semantico": round(score_sem, 4),
-                "score_fuzzy": round(score_fuzzy, 4),
-                "score_regras": round(score_reg, 4),
-            }
+            score_final = (
+                PESO_SEMANTICO * score_sem
+                + PESO_FUZZY * score_fuzzy
+                + PESO_REGRAS * score_reg
+            )
 
-    if melhor_idx is None:
-        return None
+            if score_final > melhor_score:
+                melhor_score = score_final
+                melhor_idx = int(idx_base)
+                melhor_det = {
+                    "score_final": round(score_final, 4),
+                    "score_semantico": round(score_sem, 4),
+                    "score_fuzzy": round(score_fuzzy, 4),
+                    "score_regras": round(score_reg, 4),
+                }
 
-    return melhor_idx, melhor_det
+        if melhor_idx is None:
+            resultados[busca_norm] = None
+        else:
+            resultados[busca_norm] = (melhor_idx, melhor_det)
+
+    return resultados
+
+
+def obter_celula_segura_para_escrita(ws, linha: int, coluna: int):
+    for merged_range in ws.merged_cells.ranges:
+        if (
+            merged_range.min_row <= linha <= merged_range.max_row
+            and merged_range.min_col <= coluna <= merged_range.max_col
+        ):
+            if merged_range.min_row == merged_range.max_row == linha:
+                return ws.cell(row=merged_range.min_row, column=merged_range.min_col)
+            return None
+
+    return ws.cell(row=linha, column=coluna)
+
+
+def aplicar_resultado_no_excel_original(
+    uploaded_file,
+    nome_aba: str,
+    header_index: int,
+    df_original: pd.DataFrame,
+    df_resultado: pd.DataFrame,
+    colunas_destino_preencher: List[str],
+) -> bytes:
+    uploaded_file.seek(0)
+    wb = load_workbook(uploaded_file)
+    ws = wb[nome_aba] if nome_aba in wb.sheetnames else wb[wb.sheetnames[0]]
+
+    linha_cabecalho_excel = header_index + 1
+    primeira_linha_dados_excel = linha_cabecalho_excel + 1
+
+    mapa_colunas_destino = {}
+    for nome_coluna in colunas_destino_preencher:
+        indice_df = df_original.columns.get_loc(nome_coluna) + 1
+        mapa_colunas_destino[nome_coluna] = indice_df
+
+    for i in range(len(df_resultado)):
+        linha_excel = primeira_linha_dados_excel + i
+
+        for nome_coluna in colunas_destino_preencher:
+            if nome_coluna not in df_resultado.columns:
+                continue
+
+            coluna_excel = mapa_colunas_destino[nome_coluna]
+            valor = df_resultado.iloc[i][nome_coluna]
+
+            celula_destino = obter_celula_segura_para_escrita(ws, linha_excel, coluna_excel)
+            if celula_destino is None:
+                continue
+
+            celula_destino.value = valor
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
 
 
 def processar_preenchimento(
@@ -244,6 +321,7 @@ def processar_preenchimento(
     colunas_destino_preencher: List[str],
     coluna_texto_base: str,
     score_minimo: float,
+    top_k_candidatos: int,
 ):
     df_destino_proc = df_destino.copy()
 
@@ -258,34 +336,60 @@ def processar_preenchimento(
         if col not in df_destino_proc.columns:
             df_destino_proc[col] = None
 
+    if coluna_busca_destino not in df_destino_proc.columns:
+        return df_destino_proc
+
     total = len(df_destino_proc)
     progresso = st.progress(0)
     status = st.empty()
 
-    buscas = df_destino_proc[coluna_busca_destino].tolist() if coluna_busca_destino in df_destino_proc.columns else []
+    buscas_originais = df_destino_proc[coluna_busca_destino].tolist()
 
-    for i, busca in enumerate(buscas):
+    mapa_buscas_validas: Dict[str, str] = {}
+    for busca in buscas_originais:
+        if busca is None or str(busca).strip() == "":
+            continue
+        if eh_linha_de_titulo_ou_subtitulo(busca):
+            continue
+
+        busca_str = str(busca)
+        busca_norm = normalizar_texto(busca_str)
+        if busca_norm:
+            mapa_buscas_validas[busca_str] = busca_norm
+
+    buscas_norm_unicas = list(set(mapa_buscas_validas.values()))
+
+    status.info("Gerando resultados das buscas únicas")
+    resultados_unicos = buscar_melhor_item_em_lote(
+        buscas_norm_unicas=buscas_norm_unicas,
+        df_base_proc=df_base_proc,
+        indice=indice,
+        top_k_candidatos=top_k_candidatos,
+    )
+
+    cache_busca_original: Dict[str, Optional[Tuple[int, dict]]] = {}
+    for busca_original, busca_norm in mapa_buscas_validas.items():
+        cache_busca_original[busca_original] = resultados_unicos.get(busca_norm)
+
+    for i, busca in enumerate(buscas_originais):
         if busca is None or str(busca).strip() == "":
             df_destino_proc.at[i, tipo_col] = "Vazia"
-            progresso.progress((i + 1) / max(total, 1))
+            if i % 25 == 0 or i == total - 1:
+                progresso.progress((i + 1) / max(total, 1))
             continue
 
         if eh_linha_de_titulo_ou_subtitulo(busca):
             df_destino_proc.at[i, tipo_col] = "Título/Subtítulo"
-            progresso.progress((i + 1) / max(total, 1))
+            if i % 25 == 0 or i == total - 1:
+                progresso.progress((i + 1) / max(total, 1))
             continue
 
-        res = buscar_melhor_item(
-            texto_busca=str(busca),
-            df_base_proc=df_base_proc,
-            embeddings=embeddings,
-            indice=indice,
-            top_k_candidatos=TOP_K_CANDIDATOS,
-        )
+        res = cache_busca_original.get(str(busca))
 
         if res is None:
             df_destino_proc.at[i, tipo_col] = "Sem correspondência"
-            progresso.progress((i + 1) / max(total, 1))
+            if i % 25 == 0 or i == total - 1:
+                progresso.progress((i + 1) / max(total, 1))
             continue
 
         idx_match, det = res
@@ -295,7 +399,8 @@ def processar_preenchimento(
             df_destino_proc.at[i, match_col] = "Confiança baixa"
             df_destino_proc.at[i, idx_col] = int(idx_match) + 2
             df_destino_proc.at[i, tipo_col] = "Item, confiança baixa"
-            progresso.progress((i + 1) / max(total, 1))
+            if i % 25 == 0 or i == total - 1:
+                progresso.progress((i + 1) / max(total, 1))
             continue
 
         for col_base, col_dest in zip(colunas_base_retorno, colunas_destino_preencher):
@@ -306,35 +411,25 @@ def processar_preenchimento(
         df_destino_proc.at[i, idx_col] = int(idx_match) + 2
         df_destino_proc.at[i, tipo_col] = "Item"
 
-        if i % 10 == 0 or i == total - 1:
+        if i % 25 == 0 or i == total - 1:
             status.info(f"Processando linha {i + 1} de {total}")
-        progresso.progress((i + 1) / max(total, 1))
+            progresso.progress((i + 1) / max(total, 1))
 
     progresso.empty()
     status.empty()
     return df_destino_proc
 
 
-def dataframe_para_excel_bytes(df: pd.DataFrame, nome_aba: str = "Resultado") -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=nome_aba)
-    output.seek(0)
-    return output.getvalue()
-
-
-st.title("Orçamento IA - VSN")
+st.title("Orçamento IA, VSN")
 st.caption("Importe a base de dados e a planilha a preencher, escolha as colunas e gere o arquivo preenchido.")
 
 with st.sidebar:
     st.header("Configurações")
     score_minimo = st.slider("Score mínimo para preencher", 0.0, 1.0, 0.35, 0.01)
-    header_base = st.number_input("Linha do cabeçalho da base", min_value=1, value=1, step=1)
+    header_base = st.number_input("Linha do cabeçalho da base", min_value=1, value=3, step=1)
     header_dest = st.number_input("Linha do cabeçalho da planilha a preencher", min_value=1, value=1, step=1)
-    st.markdown("Informação: Se a base tem cabeçalho na linha 3 do Excel, informe 3.")
-    st.number_input("Qtd. de candidatos por busca", min_value=5, max_value=100, value=30, step=5, key="topk_ui")
-
-TOP_K_CANDIDATOS = st.session_state["topk_ui"]
+    top_k_candidatos = st.number_input("Qtd. de candidatos por busca", min_value=5, max_value=100, value=30, step=5)
+    st.markdown("Sugestão, se a base tem cabeçalho na linha 3 do Excel, informe 3.")
 
 col1, col2 = st.columns(2)
 
@@ -406,6 +501,7 @@ if arquivo_base and arquivo_destino:
         else:
             st.divider()
             st.subheader("4. Prévia")
+
             p1, p2 = st.columns(2)
             with p1:
                 st.write("Base")
@@ -423,12 +519,21 @@ if arquivo_base and arquivo_destino:
                     colunas_destino_preencher=colunas_destino_preencher,
                     coluna_texto_base=coluna_texto_base,
                     score_minimo=score_minimo,
+                    top_k_candidatos=int(top_k_candidatos),
                 )
 
                 st.success("Processamento concluído.")
                 st.dataframe(resultado.head(50), use_container_width=True)
 
-                excel_bytes = dataframe_para_excel_bytes(resultado, nome_aba=aba_dest)
+                excel_bytes = aplicar_resultado_no_excel_original(
+                    uploaded_file=arquivo_destino,
+                    nome_aba=aba_dest,
+                    header_index=int(header_dest) - 1,
+                    df_original=df_destino,
+                    df_resultado=resultado,
+                    colunas_destino_preencher=colunas_destino_preencher,
+                )
+
                 st.download_button(
                     label="Baixar planilha preenchida",
                     data=excel_bytes,
