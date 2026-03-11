@@ -430,7 +430,6 @@ with st.sidebar:
     header_dest = st.number_input("Linha do cabeçalho da planilha a preencher", min_value=1, value=1, step=1)
     st.markdown("Sugestão, se a base tem cabeçalho na linha 3 do Excel, informe 3.")
     top_k_candidatos = st.number_input("Qtd. de candidatos por busca", min_value=5, max_value=100, value=30, step=5)
-    st.markdown("Sugestão, se a base tem cabeçalho na linha 3 do Excel, informe 3.")
 
 col1, col2 = st.columns(2)
 
@@ -546,4 +545,5 @@ if arquivo_base and arquivo_destino:
         st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.info("Importe os dois arquivos para habilitar o mapeamento e o preenchimento automático.")
+
 
