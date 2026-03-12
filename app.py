@@ -271,6 +271,19 @@ def obter_celula_segura_para_escrita(ws, linha: int, coluna: int):
     return ws.cell(row=linha, column=coluna)
 
 
+def encontrar_ultima_coluna_com_dados(ws) -> int:
+    for coluna in range(ws.max_column, 0, -1):
+        for linha in range(1, ws.max_row + 1):
+            valor = ws.cell(row=linha, column=coluna).value
+            if valor is not None and str(valor).strip() != "":
+                return coluna
+    return 0
+
+
+def obter_nome_coluna_referencia(coluna_texto_base: str) -> str:
+    return f"IA_REFERENCIA_BASE ({coluna_texto_base})"
+
+
 def aplicar_resultado_no_excel_original(
     uploaded_file,
     nome_aba: str,
@@ -278,6 +291,7 @@ def aplicar_resultado_no_excel_original(
     df_original: pd.DataFrame,
     df_resultado: pd.DataFrame,
     colunas_destino_preencher: List[str],
+    nome_coluna_referencia: str,
 ) -> bytes:
     uploaded_file.seek(0)
     wb = load_workbook(uploaded_file)
@@ -291,9 +305,9 @@ def aplicar_resultado_no_excel_original(
         indice_df = df_original.columns.get_loc(nome_coluna) + 1
         mapa_colunas_destino[nome_coluna] = indice_df
 
-    desc_base_col = "DESCRIÇÃO BASE IA"
-    coluna_nova_excel = ws.max_column + 1
-    ws.cell(row=linha_cabecalho_excel, column=coluna_nova_excel).value = desc_base_col
+    ultima_coluna_com_dados = encontrar_ultima_coluna_com_dados(ws)
+    coluna_referencia_excel = ultima_coluna_com_dados + 1
+    ws.cell(row=linha_cabecalho_excel, column=coluna_referencia_excel).value = nome_coluna_referencia
 
     for i in range(len(df_resultado)):
         linha_excel = primeira_linha_dados_excel + i
@@ -311,8 +325,10 @@ def aplicar_resultado_no_excel_original(
 
             celula_destino.value = valor
 
-        if desc_base_col in df_resultado.columns:
-            ws.cell(row=linha_excel, column=coluna_nova_excel).value = df_resultado.iloc[i][desc_base_col]
+        if nome_coluna_referencia in df_resultado.columns:
+            celula_referencia = obter_celula_segura_para_escrita(ws, linha_excel, coluna_referencia_excel)
+            if celula_referencia is not None:
+                celula_referencia.value = df_resultado.iloc[i][nome_coluna_referencia]
 
     output = io.BytesIO()
     wb.save(output)
@@ -336,9 +352,9 @@ def processar_preenchimento(
     match_col = "IA_DESCRICAO_ENCONTRADA"
     idx_col = "IA_LINHA_BASE"
     tipo_col = "IA_TIPO_LINHA"
-    desc_base_col = "DESCRIÇÃO BASE IA"
+    referencia_col = obter_nome_coluna_referencia(coluna_texto_base)
 
-    for col in [score_col, match_col, idx_col, tipo_col, desc_base_col]:
+    for col in [score_col, match_col, idx_col, tipo_col, referencia_col]:
         if col not in df_destino_proc.columns:
             df_destino_proc[col] = None
 
@@ -405,20 +421,20 @@ def processar_preenchimento(
 
         if res is None:
             df_destino_proc.at[i, tipo_col] = "Sem correspondência"
-            df_destino_proc.at[i, desc_base_col] = "Sem correspondência"
+            df_destino_proc.at[i, referencia_col] = "Sem correspondência"
             if i % 25 == 0 or i == total - 1:
                 progresso.progress(0.55 + 0.45 * ((i + 1) / max(total, 1)))
             continue
 
         idx_match, det = res
-        descricao_base = df_base_proc.iloc[idx_match][coluna_texto_base]
+        referencia_base = df_base_proc.iloc[idx_match][coluna_texto_base]
 
         if det["score_final"] < score_minimo:
             df_destino_proc.at[i, score_col] = det["score_final"]
             df_destino_proc.at[i, match_col] = "Confiança baixa"
             df_destino_proc.at[i, idx_col] = int(idx_match) + 2
             df_destino_proc.at[i, tipo_col] = "Item, confiança baixa"
-            df_destino_proc.at[i, desc_base_col] = descricao_base
+            df_destino_proc.at[i, referencia_col] = referencia_base
             if i % 25 == 0 or i == total - 1:
                 progresso.progress(0.55 + 0.45 * ((i + 1) / max(total, 1)))
             continue
@@ -427,10 +443,10 @@ def processar_preenchimento(
             df_destino_proc.at[i, col_dest] = df_base_proc.iloc[idx_match][col_base]
 
         df_destino_proc.at[i, score_col] = det["score_final"]
-        df_destino_proc.at[i, match_col] = descricao_base
+        df_destino_proc.at[i, match_col] = referencia_base
         df_destino_proc.at[i, idx_col] = int(idx_match) + 2
         df_destino_proc.at[i, tipo_col] = "Item"
-        df_destino_proc.at[i, desc_base_col] = descricao_base
+        df_destino_proc.at[i, referencia_col] = referencia_base
 
         if i % 25 == 0 or i == total - 1:
             status.info(f"Em processamento. Preenchendo os dados na planilha de destino. Linha {i + 1} de {total}.")
@@ -496,6 +512,11 @@ if arquivo_base and arquivo_destino:
                 index=df_destino.columns.tolist().index("G") if "G" in df_destino.columns else 0,
             )
 
+        st.info(
+            f"A referência do item encontrado será gravada em uma nova coluna no final da planilha, "
+            f"usando os valores da coluna '{coluna_texto_base}' da base."
+        )
+
         st.markdown("### Colunas da base que deseja obter")
         colunas_base_retorno = st.multiselect(
             "Selecione as colunas da base",
@@ -553,6 +574,7 @@ if arquivo_base and arquivo_destino:
                     df_original=df_destino,
                     df_resultado=resultado,
                     colunas_destino_preencher=colunas_destino_preencher,
+                    nome_coluna_referencia=obter_nome_coluna_referencia(coluna_texto_base),
                 )
 
                 st.download_button(
@@ -566,5 +588,3 @@ if arquivo_base and arquivo_destino:
         st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.info("Importe os dois arquivos para habilitar o mapeamento e o preenchimento automático.")
-
-
