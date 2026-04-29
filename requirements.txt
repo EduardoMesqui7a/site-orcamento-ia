@@ -1,8 +1,8 @@
 streamlit
 pandas
 openpyxl
-sentence-transformers
 rapidfuzz
 unidecode
-torch
 scikit-learn
+huggingface_hub
+llama-cpp-python
