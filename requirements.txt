@@ -5,4 +5,4 @@ rapidfuzz
 unidecode
 scikit-learn
 huggingface_hub
-llama-cpp-python
+llama-cpp-python; python_version < "3.13"
