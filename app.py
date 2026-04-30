@@ -180,6 +180,7 @@ def processar_preenchimento(
     colunas_base_retorno: List[str],
     colunas_destino_preencher: List[str],
     coluna_texto_base: str,
+    linha_cabecalho_base_excel: int,
     score_minimo: float,
     top_k_candidatos: int,
     llm_config: LLMDecisionConfig,
@@ -198,6 +199,7 @@ def processar_preenchimento(
 
     status = st.empty()
     progresso = st.progress(0)
+    primeira_linha_dados_base_excel = int(linha_cabecalho_base_excel) + 1
 
     status.info("Em processamento. Preparando o motor Itemiza com TF-IDF e regras técnicas.")
     df_base_proc, vetorizador, matriz_base = preparar_base_cache(df_base, coluna_texto_base)
@@ -279,13 +281,14 @@ def processar_preenchimento(
 
         idx_match, det = res
         referencia_base = df_base_proc.iloc[idx_match][coluna_texto_base]
+        linha_base_excel = int(idx_match) + primeira_linha_dados_base_excel
 
         if (det["score_final"] < score_minimo) or (not det.get("aceito", True)):
             df_destino_proc.at[i, score_col] = det["score_final"]
             df_destino_proc.at[i, match_col] = "Confiança baixa"
-            df_destino_proc.at[i, idx_col] = int(idx_match) + 2
+            df_destino_proc.at[i, idx_col] = linha_base_excel
             df_destino_proc.at[i, tipo_col] = "Item, confiança baixa"
-            df_destino_proc.at[i, referencia_col] = referencia_base
+            df_destino_proc.at[i, referencia_col] = f"REVISAR | {referencia_base}"
             if i % 25 == 0 or i == total - 1:
                 progresso.progress(0.55 + 0.45 * ((i + 1) / max(total, 1)))
             continue
@@ -295,7 +298,7 @@ def processar_preenchimento(
 
         df_destino_proc.at[i, score_col] = det["score_final"]
         df_destino_proc.at[i, match_col] = referencia_base
-        df_destino_proc.at[i, idx_col] = int(idx_match) + 2
+        df_destino_proc.at[i, idx_col] = linha_base_excel
         df_destino_proc.at[i, tipo_col] = "Item"
         df_destino_proc.at[i, referencia_col] = referencia_base
 
@@ -433,6 +436,7 @@ if arquivo_base and arquivo_destino:
                     colunas_base_retorno=colunas_base_retorno,
                     colunas_destino_preencher=colunas_destino_preencher,
                     coluna_texto_base=coluna_texto_base,
+                    linha_cabecalho_base_excel=int(header_base),
                     score_minimo=score_minimo,
                     top_k_candidatos=int(top_k_candidatos),
                     llm_config=llm_config,
