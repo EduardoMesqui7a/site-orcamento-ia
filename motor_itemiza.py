@@ -29,10 +29,30 @@ def normalizar_texto(texto: str) -> str:
         return ""
 
     texto = str(texto).strip().lower()
+    texto = (
+        texto.replace("ø", " diametro ")
+        .replace("∅", " diametro ")
+        .replace("º", " graus ")
+        .replace("°", " graus ")
+        .replace("”", '"')
+        .replace("“", '"')
+        .replace("’", "'")
+        .replace("″", '"')
+    )
     texto = unidecode(texto)
     substituicoes = {
         "fck": "resistencia caracteristica",
         "mpa": "megapascal",
+        "astm a53/a53m": "astm a53",
+        "astm a 53": "astm a53",
+        "gr. b-s": "gr b",
+        "gr. b": "gr b",
+        "sch. 80": "sch 80",
+        "sch. 40": "sch 40",
+        "c/ rosca npt": "com rosca npt",
+        "sc": "sem costura",
+        "cc": "com costura",
+        "pc": "ponta chanfrada",
         "concreto armado": "concreto estrutural armado",
         "concreto simples": "concreto sem armadura",
         "divisoria": "parede divisoria vedacao compartimentacao interna",
@@ -53,6 +73,9 @@ def normalizar_texto(texto: str) -> str:
         "escavacao": "movimento de terra escavacao",
         "aterro": "movimento de terra aterro compactacao",
         "lastro": "camada de regularizacao lastro",
+        "cuba inox para pia": "cuba de embutir em aco inox para pia",
+        "cuba inox": "cuba em aco inox",
+        "sifao metalico": "sifao metalico acessorio esgoto",
     }
     for de, para in sorted(substituicoes.items(), key=lambda item: len(item[0]), reverse=True):
         texto = re.sub(rf"(?<!\w){re.escape(de)}(?!\w)", para, texto)
@@ -120,6 +143,8 @@ def score_regras(busca_norm: str, descricao_norm: str) -> float:
         ("minidisjuntor", "minidisjuntor"),
         ("contator", "contator"),
         ("rele", "rele"),
+        ("cuba", "cuba"),
+        ("sifao", "sifao"),
         ("tomada", "tomada"),
         ("interruptor", "interruptor"),
         ("eletroduto", "eletroduto"),
@@ -148,11 +173,30 @@ def score_regras(busca_norm: str, descricao_norm: str) -> float:
     if "eletroduto" in busca_norm and "eletroduto" in descricao_norm:
         score += 0.12
 
+    if "cuba" in busca_norm and "cuba" in descricao_norm:
+        score += 0.22
+    if "cuba" in busca_norm and "sifao" in descricao_norm:
+        score -= 0.20
+    if "curva 45" in busca_norm and "curva 45" in descricao_norm:
+        score += 0.18
+    if "curva 45" in busca_norm and "curva 90" in descricao_norm:
+        score -= 0.18
+
     return min(score, 1.0)
 
 
 def _normalizar_texto_tecnico(texto: str) -> str:
     texto = str(texto or "").lower()
+    texto = (
+        texto.replace("ø", " diametro ")
+        .replace("∅", " diametro ")
+        .replace("º", " graus ")
+        .replace("°", " graus ")
+        .replace("”", '"')
+        .replace("“", '"')
+        .replace("’", "'")
+        .replace("″", '"')
+    )
     texto = texto.replace("mm²", "mm2").replace("m²", "m2").replace("cm²", "cm2")
     texto = texto.replace("ø", " diametro ")
     texto = unidecode(texto)
@@ -189,11 +233,24 @@ def _extrair_tokens_lista(texto: str, termos: Dict[str, List[str]]) -> Set[str]:
 
 def _extrair_polegadas(texto: str) -> Set[str]:
     polegadas: Set[str] = set()
-    for valor in re.findall(r"(?<![\d/])(\d+/\d+)\s*(?:\"|pol|polegada|polegadas)", texto, flags=re.IGNORECASE):
+    for inteiro, fracao in re.findall(r"(?<![\d./])(\d+)[\.\s]+(\d+/\d+)\s*(?:\"|pol|polegada|polegadas)?", texto, flags=re.IGNORECASE):
+        polegadas.add(f"{inteiro}.{fracao}")
+    for valor in re.findall(r"(?<![\d./])(\d+/\d+)\s*(?:\"|pol|polegada|polegadas)?", texto, flags=re.IGNORECASE):
         polegadas.add(valor)
     for valor in re.findall(r"(?<![\d./-])(\d+(?:\.\d+)?)\s*(?:\"|pol|polegada|polegadas)", texto, flags=re.IGNORECASE):
         polegadas.add(_normalizar_valor_tecnico(valor))
     return polegadas
+
+
+def _extrair_diametro_nominal(texto: str) -> Set[str]:
+    valores: Set[str] = set()
+    for inteiro, fracao in re.findall(r"diametro\s*(\d+)[\.\s]+(\d+/\d+)", texto, flags=re.IGNORECASE):
+        valores.add(f"{inteiro}.{fracao}")
+    for valor in re.findall(r"diametro\s*(\d+/\d+)", texto, flags=re.IGNORECASE):
+        valores.add(valor)
+    for valor in re.findall(r"diametro\s*(\d+(?:\.\d+)?)(?!\s*[/.]\s*\d)", texto, flags=re.IGNORECASE):
+        valores.add(_normalizar_valor_tecnico(valor))
+    return valores
 
 
 def inferir_familia_principal(
@@ -206,6 +263,8 @@ def inferir_familia_principal(
     prioridade = [
         "hidrante",
         "vaso_sanitario",
+        "cuba",
+        "sifao",
         "disjuntor",
         "contator",
         "rele",
@@ -336,10 +395,10 @@ def inferir_natureza_item(
     if any(marcador in texto for marcador in marcadores_composto):
         return "item_composto"
 
-    if familia_principal in {"te", "curva", "reducao", "luva", "flange", "terminal", "valvula", "grampo", "bucha", "tomada", "interruptor", "rele", "contator"}:
+    if familia_principal in {"te", "curva", "reducao", "luva", "flange", "terminal", "valvula", "grampo", "bucha", "tomada", "interruptor", "rele", "contator", "sifao"}:
         return "acessorio"
 
-    if familia_principal in {"hidrante", "vaso_sanitario"}:
+    if familia_principal in {"hidrante", "vaso_sanitario", "cuba"}:
         return "conjunto"
 
     if len(familias_detectadas) >= 3:
@@ -368,6 +427,8 @@ def extrair_atributos_tecnicos(texto: str) -> Dict[str, Set[str]]:
     familias = {
         "hidrante": ["hidrante", "coluna de hidrante", "hidrante tipo coluna"],
         "vaso_sanitario": ["vaso sanitario", "bacia sanitaria", "caixa acoplada", "louca"],
+        "cuba": ["cuba", "cubas", "cuba de embutir", "cuba inox", "cuba em inox"],
+        "sifao": ["sifao", "sifao metalico"],
         "terminal": ["terminal", "terminais", "conector", "olhal", "sapata"],
         "cabo": ["cabo", "cabos", "condutor", "condutores"],
         "disjuntor": ["disjuntor", "disjuntores", "minidisjuntor", "mini disjuntor", "mini-disjuntor"],
@@ -422,11 +483,13 @@ def extrair_atributos_tecnicos(texto: str) -> Dict[str, Set[str]]:
         "diametro_mm": _extrair_valores(r"(?:diametro\s*)?(\d+(?:\.\d+)?)\s*mm\b(?!\s*2)", tecnico),
         "diametro_cm": _extrair_valores(r"(?:diametro\s*)?(\d+(?:\.\d+)?)\s*cm\b(?!\s*2)", tecnico),
         "polegada": _extrair_polegadas(tecnico),
+        "diametro_nominal": _extrair_diametro_nominal(tecnico),
         "mpa": _extrair_valores(r"\b(?:fck\s*)?(\d+(?:\.\d+)?)\s*(?:mpa|megapascal)\b", tecnico),
         "tensao_v": _extrair_valores(r"\b(\d+(?:\.\d+)?)\s*(?:v|volt|volts)\b", tecnico),
         "tensao_kv": _extrair_valores(r"\b(\d+(?:\.\d+)?)\s*kv\b", tecnico),
         "corrente_a": _extrair_valores(r"\b(\d+(?:\.\d+)?)\s*a\b", tecnico),
         "interrupcao_ka": _extrair_valores(r"\b(\d+(?:\.\d+)?)\s*ka\b", tecnico),
+        "angulo_graus": _extrair_valores(r"\b(?:curva|cotovelo)?\s*(45|90)\s*(?:graus|grau)?\b", tecnico),
         "polos": _extrair_tokens_lista(
             tecnico,
             {
@@ -470,6 +533,7 @@ def detectar_conflitos_tecnicos(atributos_busca: Dict[str, Set[str]], atributos_
         "bitola_mm2",
         "dn",
         "polegada",
+        "diametro_nominal",
         "diametro_mm",
         "diametro_cm",
         "familia_principal",
@@ -479,6 +543,7 @@ def detectar_conflitos_tecnicos(atributos_busca: Dict[str, Set[str]], atributos_
         "tensao_kv",
         "corrente_a",
         "interrupcao_ka",
+        "angulo_graus",
         "polos",
         "curva_disparo",
     }:
@@ -543,8 +608,12 @@ def avaliar_confianca_match(
             motivos.append("faixa_tensao_incompativel")
     if "bitola_mm2" in conflitos_set and score_final < 0.78:
         motivos.append("conflito_de_bitola")
+    if "diametro_nominal" in conflitos_set and score_final < 0.90:
+        motivos.append("conflito_de_diametro_nominal")
     if "polegada" in conflitos_set and score_final < 0.82:
         motivos.append("conflito_de_polegada")
+    if "angulo_graus" in conflitos_set and score_final < 0.90:
+        motivos.append("conflito_de_angulo")
     if "dn" in conflitos_set and score_final < 0.82:
         motivos.append("conflito_de_dn")
     if ("diametro_mm" in conflitos_set or "diametro_cm" in conflitos_set) and score_final < 0.82:
@@ -568,6 +637,7 @@ def _score_bonus_tecnico(atributos_busca: Dict[str, Set[str]], atributos_base: D
         "bitola_mm2": 0.08,
         "dn": 0.08,
         "polegada": 0.08,
+        "diametro_nominal": 0.12,
         "diametro_mm": 0.08,
         "diametro_cm": 0.08,
         "classes": 0.06,
@@ -576,14 +646,35 @@ def _score_bonus_tecnico(atributos_busca: Dict[str, Set[str]], atributos_base: D
         "tensao_kv": 0.07,
         "corrente_a": 0.07,
         "interrupcao_ka": 0.07,
+        "angulo_graus": 0.10,
         "polos": 0.07,
         "curva_disparo": 0.05,
         "natureza_item": 0.06,
     }
     for chave in coincidencias:
         bonus += pesos.get(chave, 0.03)
+    pesos_conflito = {
+        "familia_principal": 0.22,
+        "subfamilias": 0.14,
+        "bitola_mm2": 0.18,
+        "dn": 0.18,
+        "polegada": 0.45,
+        "diametro_nominal": 0.34,
+        "diametro_mm": 0.20,
+        "diametro_cm": 0.20,
+        "classes": 0.12,
+        "materiais": 0.10,
+        "tensao_v": 0.16,
+        "tensao_kv": 0.16,
+        "corrente_a": 0.16,
+        "interrupcao_ka": 0.16,
+        "angulo_graus": 0.34,
+        "polos": 0.18,
+        "curva_disparo": 0.14,
+        "natureza_item": 0.12,
+    }
     for chave in conflitos:
-        bonus -= pesos.get(chave, 0.04) * 0.85
+        bonus -= pesos_conflito.get(chave, 0.06)
     return bonus, coincidencias, conflitos
 
 
@@ -670,7 +761,7 @@ def buscar_melhor_item_em_lote(
                 }
             )
 
-        candidatos_ranqueados.sort(key=lambda item: item["score_final"], reverse=True)
+        candidatos_ranqueados.sort(key=lambda item: (-item["score_final"], item["idx_base"]))
         if not candidatos_ranqueados:
             resultados[busca_norm] = None
             continue
