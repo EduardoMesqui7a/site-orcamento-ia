@@ -20,6 +20,11 @@ O app usa um motor textual TF-IDF com `char_wb` e `ngram_range=(3, 5)`, combinad
 
 O app pode usar uma LLM apenas como reranqueadora em casos ambiguos, com fallback automatico para o ranking tradicional.
 
+Agora ela pode entrar em dois cenarios:
+
+- casos ambiguos: candidatos proximos entre si
+- casos de score baixo recuperavel: quando o topo ainda parece plausivel, mas o ranking tradicional ficou fraco
+
 Configuracao padrao atual:
 
 - backend: `huggingface`

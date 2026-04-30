@@ -43,6 +43,19 @@ def _compactar_lista(valor: Any, limite: int = 4) -> list[str]:
     return itens
 
 
+def _candidato_tem_sinal_tecnico(candidato: Any, config: LLMDecisionConfig) -> bool:
+    if not isinstance(candidato, dict):
+        return False
+    if float(candidato.get("score_base", 0.0) or 0.0) > 0.0:
+        if float(candidato.get("score_base", 0.0) or 0.0) >= config.decision_low_score_min_base:
+            return True
+    for campo in ("familia_principal", "subfamilias", "coincidencias_tecnicas"):
+        valor = candidato.get(campo)
+        if isinstance(valor, (list, tuple, set)) and len(valor) > 0:
+            return True
+    return False
+
+
 def _resumo_candidato_llm(candidato: Any) -> Dict[str, Any]:
     if not isinstance(candidato, dict):
         return {"descricao": _texto_candidato(candidato)}
@@ -83,13 +96,25 @@ def _deve_usar_decisao_semantica(candidates: List[Any], config: LLMDecisionConfi
     segundo_score = _score_candidato(ordenados[1])
     gap = melhor_score - segundo_score
 
+    if config.decision_min_top_score <= melhor_score <= config.decision_max_top_score and gap <= config.decision_max_gap:
+        return True, f"ambiguo(score_topo={melhor_score:.3f}|gap={gap:.3f})"
+
+    if config.decision_low_score_min <= melhor_score < config.decision_low_score_max:
+        if segundo_score < config.decision_low_score_second_min:
+            return False, f"baixo_score_sem_segundo_plausivel({segundo_score:.3f}<{config.decision_low_score_second_min:.3f})"
+        topo_tem_sinal = _candidato_tem_sinal_tecnico(ordenados[0], config)
+        segundo_tem_sinal = _candidato_tem_sinal_tecnico(ordenados[1], config)
+        if not (topo_tem_sinal or segundo_tem_sinal):
+            return False, "baixo_score_sem_sinal_tecnico"
+        return True, f"baixo_score_recuperavel(score_topo={melhor_score:.3f}|score_segundo={segundo_score:.3f})"
+
     if melhor_score < config.decision_min_top_score:
         return False, f"score_topo_baixo({melhor_score:.3f}<{config.decision_min_top_score:.3f})"
     if melhor_score > config.decision_max_top_score:
         return False, f"score_topo_muito_alto({melhor_score:.3f}>{config.decision_max_top_score:.3f})"
     if gap > config.decision_max_gap:
         return False, f"gap_confianca_alto({gap:.3f}>{config.decision_max_gap:.3f})"
-    return True, f"score_topo={melhor_score:.3f}|gap={gap:.3f}"
+    return True, f"ambiguo(score_topo={melhor_score:.3f}|gap={gap:.3f})"
 
 
 def decide_best_candidate_with_llm(
