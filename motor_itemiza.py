@@ -20,6 +20,7 @@ PESO_SEMANTICO = 0.55
 PESO_FUZZY = 0.20
 PESO_REGRAS = 0.25
 TOP_K_PADRAO = 50
+TOP_K_RERANK_TECNICO = 200
 SCORE_MINIMO_CONFIAVEL = 0.42
 GAP_MINIMO_CONFIAVEL = 0.035
 
@@ -59,7 +60,6 @@ def normalizar_texto(texto: str) -> str:
         "drywall": "parede leve em gesso acartonado",
         "alvenaria": "parede de alvenaria vedacao",
         "parede": "vedacao parede fechamento",
-        "aco": "aco armadura",
         "armacao": "armadura aco",
         "forma": "forma madeira compensado",
         "tubo": "tubulacao",
@@ -181,6 +181,12 @@ def score_regras(busca_norm: str, descricao_norm: str) -> float:
         score += 0.18
     if "curva 45" in busca_norm and "curva 90" in descricao_norm:
         score -= 0.18
+    if "aco" in busca_norm and "aco" in descricao_norm:
+        score += 0.12
+    if "solda" in busca_norm and "solda" in descricao_norm:
+        score += 0.10
+    if "bisel" in busca_norm and "bisel" in descricao_norm:
+        score += 0.10
 
     return min(score, 1.0)
 
@@ -265,6 +271,7 @@ def inferir_familia_principal(
         "vaso_sanitario",
         "cuba",
         "sifao",
+        "isolamento",
         "disjuntor",
         "contator",
         "rele",
@@ -429,6 +436,7 @@ def extrair_atributos_tecnicos(texto: str) -> Dict[str, Set[str]]:
         "vaso_sanitario": ["vaso sanitario", "bacia sanitaria", "caixa acoplada", "louca"],
         "cuba": ["cuba", "cubas", "cuba de embutir", "cuba inox", "cuba em inox"],
         "sifao": ["sifao", "sifao metalico"],
+        "isolamento": ["isolamento", "isolante", "la de rocha", "lã de rocha"],
         "terminal": ["terminal", "terminais", "conector", "olhal", "sapata"],
         "cabo": ["cabo", "cabos", "condutor", "condutores"],
         "disjuntor": ["disjuntor", "disjuntores", "minidisjuntor", "mini disjuntor", "mini-disjuntor"],
@@ -536,6 +544,7 @@ def detectar_conflitos_tecnicos(atributos_busca: Dict[str, Set[str]], atributos_
         "diametro_nominal",
         "diametro_mm",
         "diametro_cm",
+        "materiais",
         "familia_principal",
         "subfamilias",
         "classes",
@@ -551,6 +560,9 @@ def detectar_conflitos_tecnicos(atributos_busca: Dict[str, Set[str]], atributos_
         if not valores_busca:
             continue
         valores_base = atributos_base.get(chave)
+        if chave == "materiais" and not valores_base:
+            conflitos.append(chave)
+            continue
         if valores_base and not (valores_busca & valores_base):
             conflitos.append(chave)
     return conflitos
@@ -711,7 +723,7 @@ def buscar_melhor_item_em_lote(
 
     llm_config = llm_config or LLMDecisionConfig()
     matriz_buscas = vetorizador.transform(buscas_norm_unicas)
-    k = min(max(top_k_candidatos, TOP_K_PADRAO), len(df_base_proc))
+    k = min(max(top_k_candidatos, TOP_K_PADRAO, TOP_K_RERANK_TECNICO), len(df_base_proc))
     resultados: Dict[str, Optional[Tuple[int, dict]]] = {}
     textos_base_originais = df_base_proc["__texto_base_original__"].tolist()
     textos_base_norm = df_base_proc["__texto_base_norm__"].tolist()

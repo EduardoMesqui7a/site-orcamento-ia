@@ -15,6 +15,8 @@ from motor_itemiza import (
     preparar_base_para_busca,
 )
 
+MOTOR_CACHE_VERSION = "itemiza-v2026-04-29-curve-priority"
+
 st.set_page_config(page_title="Orçamento IA - VSN", layout="wide")
 
 
@@ -91,7 +93,7 @@ def dataframe_preview_safe(df: pd.DataFrame, limit: int) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def preparar_base_cache(df_base: pd.DataFrame, coluna_texto_base: str):
+def preparar_base_cache(df_base: pd.DataFrame, coluna_texto_base: str, cache_version: str):
     return preparar_base_para_busca(df_base, coluna_texto_base)
 
 
@@ -197,12 +199,20 @@ def processar_preenchimento(
         if col not in df_destino_proc.columns:
             df_destino_proc[col] = None
 
+    for col_dest in colunas_destino_preencher:
+        if col_dest in df_destino_proc.columns:
+            df_destino_proc[col_dest] = df_destino_proc[col_dest].astype(object)
+
     status = st.empty()
     progresso = st.progress(0)
     primeira_linha_dados_base_excel = int(linha_cabecalho_base_excel) + 1
 
     status.info("Em processamento. Preparando o motor Itemiza com TF-IDF e regras técnicas.")
-    df_base_proc, vetorizador, matriz_base = preparar_base_cache(df_base, coluna_texto_base)
+    df_base_proc, vetorizador, matriz_base = preparar_base_cache(
+        df_base,
+        coluna_texto_base,
+        MOTOR_CACHE_VERSION,
+    )
     progresso.progress(0.10)
 
     if coluna_busca_destino not in df_destino_proc.columns:
@@ -284,11 +294,13 @@ def processar_preenchimento(
         linha_base_excel = int(idx_match) + primeira_linha_dados_base_excel
 
         if (det["score_final"] < score_minimo) or (not det.get("aceito", True)):
+            for col_base, col_dest in zip(colunas_base_retorno, colunas_destino_preencher):
+                df_destino_proc.at[i, col_dest] = df_base_proc.iloc[idx_match][col_base]
             df_destino_proc.at[i, score_col] = det["score_final"]
-            df_destino_proc.at[i, match_col] = "Confiança baixa"
+            df_destino_proc.at[i, match_col] = referencia_base
             df_destino_proc.at[i, idx_col] = linha_base_excel
             df_destino_proc.at[i, tipo_col] = "Item, confiança baixa"
-            df_destino_proc.at[i, referencia_col] = f"REVISAR | {referencia_base}"
+            df_destino_proc.at[i, referencia_col] = referencia_base
             if i % 25 == 0 or i == total - 1:
                 progresso.progress(0.55 + 0.45 * ((i + 1) / max(total, 1)))
             continue
