@@ -1,4 +1,4 @@
-﻿# site-orcamento-ia
+# site-orcamento-ia
 
 Aplicativo Streamlit simples para preenchimento inteligente de planilhas de orcamento.
 
@@ -20,15 +20,37 @@ O app usa um motor textual TF-IDF com `char_wb` e `ngram_range=(3, 5)`, combinad
 
 O app pode usar uma LLM apenas como reranqueadora em casos ambiguos, com fallback automatico para o ranking tradicional.
 
-Configuracao padrao:
+Configuracao padrao atual:
 
-- modelo logico: `qwen2.5:1.5b-instruct`
-- repositorio Hugging Face: `Qwen/Qwen2.5-1.5B-Instruct-GGUF`
-- arquivo GGUF: `qwen2.5-1.5b-instruct-q2_k.gguf`
-- backend: `llama-cpp-python`
+- backend: `huggingface`
+- modelo logico: `qwen2.5:3b-instruct`
+- modelo remoto: `Qwen/Qwen2.5-3B-Instruct`
+- uso: apenas em casos ambiguos
+
+### Streamlit Community Cloud
+
+Para habilitar a LLM no Streamlit Cloud, configure um secret:
+
+- `HF_API_TOKEN = seu_token_do_hugging_face`
+
+Opcionalmente, voce tambem pode definir:
+
+- `HF_PROVIDER = nome_do_provider`
+
+O app le `st.secrets` automaticamente e usa esse token no backend remoto do Hugging Face.
+
+## Fallback seguro
+
+Se o backend remoto falhar, atrasar, retornar algo invalido ou o token nao estiver configurado, o app continua funcionando com fallback automatico sem LLM.
+
+## Backend local opcional
+
+Se quiser rodar a LLM localmente fora do Streamlit Cloud, ainda e possivel usar `llama-cpp-python` com GGUF:
+
+- `LLM_BACKEND_MODE=llama_cpp`
+- `LLM_MODEL_REPO=Qwen/Qwen2.5-1.5B-Instruct-GGUF`
+- `LLM_MODEL_FILE=qwen2.5-1.5b-instruct-q2_k.gguf`
 
 ## Observacao importante
 
-Se `llama-cpp-python` nao estiver corretamente instalado no ambiente, o app continua funcionando com fallback automatico sem LLM. A melhor qualidade de decisao ambigua depende da instalacao correta de `llama-cpp-python` e do download do modelo GGUF.
-
-No Streamlit Community Cloud, a versao de Python do ambiente pode ser superior a `3.12`. Como `llama-cpp-python` pode nao ter wheel compativel nessas versoes, o `requirements.txt` instala essa dependencia apenas quando `python_version < "3.13"`, preservando o deploy com fallback automatico sem LLM.
+No Streamlit Community Cloud, o caminho mais estavel para LLM e o backend remoto do Hugging Face. O backend `llama-cpp-python` continua integrado, mas pode nao estar disponivel dependendo da versao de Python do ambiente.
