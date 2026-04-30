@@ -7,7 +7,8 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
-from llm_service import LLMDecisionConfig, get_llm_runtime_status
+import llm_service
+from llm_service import LLMDecisionConfig
 from motor_itemiza import (
     buscar_melhor_item_em_lote,
     normalizar_texto,
@@ -78,6 +79,15 @@ def carregar_excel(uploaded_file, nome_aba: Optional[str], header_index: int) ->
     df = pd.read_excel(uploaded_file, sheet_name=aba, header=header_index)
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
+
+def dataframe_preview_safe(df: pd.DataFrame, limit: int) -> pd.DataFrame:
+    preview = df.head(limit).copy()
+    for coluna in preview.columns:
+        if preview[coluna].dtype == "object":
+            preview[coluna] = preview[coluna].map(lambda v: "" if pd.isna(v) else str(v))
+    preview.columns = [str(c) for c in preview.columns]
+    return preview
 
 
 @st.cache_data(show_spinner=False)
@@ -311,7 +321,16 @@ with st.sidebar:
     st.markdown("Sugestão: se o cabeçalho da planilha está na linha 3 do Excel, informe 3.")
 
 llm_config = replace(LLMDecisionConfig(), enabled=usar_llm_ambiguos)
-llm_status = get_llm_runtime_status(llm_config)
+_llm_status_fn = getattr(llm_service, "get_llm_runtime_status", None)
+if callable(_llm_status_fn):
+    llm_status = _llm_status_fn(llm_config)
+else:
+    llm_status = {
+        "enabled": bool(llm_config.enabled),
+        "available": False,
+        "status": "fallback_import",
+        "message": "Status detalhado da LLM indisponivel neste deploy. O app segue com fallback seguro.",
+    }
 
 with st.sidebar:
     st.markdown("### Status da LLM")
@@ -401,10 +420,10 @@ if arquivo_base and arquivo_destino:
             p1, p2 = st.columns(2)
             with p1:
                 st.write("Base")
-                st.dataframe(df_base.head(10), use_container_width=True)
+                st.dataframe(dataframe_preview_safe(df_base, 10), width="stretch")
             with p2:
                 st.write("Planilha a preencher")
-                st.dataframe(df_destino.head(10), use_container_width=True)
+                st.dataframe(dataframe_preview_safe(df_destino, 10), width="stretch")
 
             if st.button("Processar preenchimento", type="primary"):
                 resultado = processar_preenchimento(
@@ -420,7 +439,7 @@ if arquivo_base and arquivo_destino:
                 )
 
                 st.success("Processamento concluído.")
-                st.dataframe(resultado.head(50), use_container_width=True)
+                st.dataframe(dataframe_preview_safe(resultado, 50), width="stretch")
 
                 excel_bytes = aplicar_resultado_no_excel_original(
                     uploaded_file=arquivo_destino,
