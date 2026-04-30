@@ -305,6 +305,84 @@ def create_default_backend(config: Optional[LLMDecisionConfig] = None) -> Option
         return None
 
 
+def get_llm_runtime_status(config: Optional[LLMDecisionConfig] = None) -> dict:
+    config = config or LLMDecisionConfig()
+
+    if not config.enabled:
+        return {
+            "enabled": False,
+            "available": False,
+            "status": "disabled",
+            "message": "LLM desativada na configuração atual.",
+        }
+
+    mode = (config.backend_mode or "llama_cpp").strip().lower()
+    if mode in {"disabled", "off", "false"}:
+        return {
+            "enabled": True,
+            "available": False,
+            "status": "disabled",
+            "message": "LLM desativada pelo modo de backend.",
+        }
+
+    if mode != "llama_cpp":
+        return {
+            "enabled": True,
+            "available": False,
+            "status": "unsupported",
+            "message": f"Backend '{mode}' não suportado nesta versão.",
+        }
+
+    if importlib.util.find_spec("llama_cpp") is None:
+        return {
+            "enabled": True,
+            "available": False,
+            "status": "missing_dependency",
+            "message": "llama-cpp-python indisponível no ambiente. O app vai usar fallback sem LLM.",
+        }
+
+    if config.model_path:
+        model_path = Path(config.model_path).expanduser()
+        if model_path.exists():
+            return {
+                "enabled": True,
+                "available": True,
+                "status": "ready_on_demand",
+                "message": f"LLM disponível sob demanda com modelo local em {model_path}.",
+            }
+        return {
+            "enabled": True,
+            "available": False,
+            "status": "missing_model",
+            "message": f"Modelo local configurado, mas não encontrado em {model_path}.",
+        }
+
+    if importlib.util.find_spec("huggingface_hub") is None:
+        return {
+            "enabled": True,
+            "available": False,
+            "status": "missing_dependency",
+            "message": "huggingface_hub indisponível. Sem download do GGUF, o app vai usar fallback sem LLM.",
+        }
+
+    cache_dir = Path(config.model_cache_dir).expanduser()
+    cached_model = cache_dir / config.model_file
+    if cached_model.exists():
+        return {
+            "enabled": True,
+            "available": True,
+            "status": "cached",
+            "message": f"LLM disponível. Modelo GGUF já encontrado no cache ({cached_model}).",
+        }
+
+    return {
+        "enabled": True,
+        "available": True,
+        "status": "download_on_first_use",
+        "message": "LLM habilitada. O modelo GGUF será carregado apenas no primeiro caso ambíguo.",
+    }
+
+
 def run_llm_decision(
     backend: LLMBackend,
     *,

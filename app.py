@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
-from llm_service import LLMDecisionConfig
+from llm_service import LLMDecisionConfig, get_llm_runtime_status
 from motor_itemiza import (
     buscar_melhor_item_em_lote,
     normalizar_texto,
@@ -311,6 +311,16 @@ with st.sidebar:
     st.markdown("Sugestão: se o cabeçalho da planilha está na linha 3 do Excel, informe 3.")
 
 llm_config = replace(LLMDecisionConfig(), enabled=usar_llm_ambiguos)
+llm_status = get_llm_runtime_status(llm_config)
+
+with st.sidebar:
+    st.markdown("### Status da LLM")
+    if llm_status["available"]:
+        st.success(llm_status["message"])
+    elif llm_status["enabled"]:
+        st.warning(llm_status["message"])
+    else:
+        st.info(llm_status["message"])
 
 col1, col2 = st.columns(2)
 
