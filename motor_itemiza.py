@@ -12,6 +12,17 @@ from unidecode import unidecode
 
 from conceptual_reranker import decide_best_candidate_with_llm
 from llm_service import LLMDecisionConfig
+from taxonomy_catalog import (
+    CLASS_ALIASES,
+    DOMAIN_BY_FAMILY,
+    FAMILY_ALIASES,
+    FAMILY_NEGATIVE_CONTEXT,
+    FAMILY_REQUIRED_ANY,
+    MATERIAL_ALIASES,
+    PRIORITY_ORDER,
+    SERVICE_ADMIN_MARKERS,
+    SUBFAMILY_ALIASES,
+)
 
 logger = logging.getLogger("site_orcamento_ia.motor")
 
@@ -21,6 +32,7 @@ PESO_FUZZY = 0.20
 PESO_REGRAS = 0.25
 TOP_K_PADRAO = 50
 TOP_K_RERANK_TECNICO = 200
+TOP_K_RECALL_AMPLIADO = 800
 SCORE_MINIMO_CONFIAVEL = 0.42
 GAP_MINIMO_CONFIAVEL = 0.035
 
@@ -237,14 +249,77 @@ def _extrair_tokens_lista(texto: str, termos: Dict[str, List[str]]) -> Set[str]:
     return encontrados
 
 
+def _extrair_normas(texto: str) -> Set[str]:
+    normas: Set[str] = set()
+    patterns = {
+        "astm_a53": r"astm\s*a\s*53(?:/a53m)?",
+        "astm_a105": r"astm\s*a\s*105(?:/a105m)?",
+        "asme_b16_5": r"asme\s*b\s*16\.?5",
+        "asme_b16_11": r"asme\s*b\s*16\.?11",
+        "asme_b16_21": r"asme\s*b\s*16\.?21",
+        "asme_b36_10": r"asme\s*b\s*36\.?10m?",
+        "abnt_nbr_5598": r"abnt\s*nbr\s*5598",
+    }
+    for key, pattern in patterns.items():
+        if re.search(pattern, texto, flags=re.IGNORECASE):
+            normas.add(key)
+    return normas
+
+
 def _extrair_polegadas(texto: str) -> Set[str]:
     polegadas: Set[str] = set()
-    for inteiro, fracao in re.findall(r"(?<![\d./])(\d+)[\.\s]+(\d+/\d+)\s*(?:\"|pol|polegada|polegadas)?", texto, flags=re.IGNORECASE):
-        polegadas.add(f"{inteiro}.{fracao}")
-    for valor in re.findall(r"(?<![\d./])(\d+/\d+)\s*(?:\"|pol|polegada|polegadas)?", texto, flags=re.IGNORECASE):
-        polegadas.add(valor)
-    for valor in re.findall(r"(?<![\d./-])(\d+(?:\.\d+)?)\s*(?:\"|pol|polegada|polegadas)", texto, flags=re.IGNORECASE):
-        polegadas.add(_normalizar_valor_tecnico(valor))
+    spans_consumidos: List[Tuple[int, int]] = []
+
+    def ja_consumido(inicio: int, fim: int) -> bool:
+        return any(inicio < fim_existente and fim > inicio_existente for inicio_existente, fim_existente in spans_consumidos)
+
+    for match in re.finditer(
+        r"(?:(?:diametro|dn)\s*)?(\d+)[\.\s]+(\d+/\d{1,2})\s*(?:\"|pol|polegada|polegadas)",
+        texto,
+        flags=re.IGNORECASE,
+    ):
+        spans_consumidos.append(match.span())
+        polegadas.add(f"{match.group(1)}.{match.group(2)}")
+
+    for match in re.finditer(
+        r"diametro\s*(\d+)[\.\s]+(\d+/\d{1,2})(?!\s*/)",
+        texto,
+        flags=re.IGNORECASE,
+    ):
+        if ja_consumido(*match.span()):
+            continue
+        spans_consumidos.append(match.span())
+        polegadas.add(f"{match.group(1)}.{match.group(2)}")
+
+    for match in re.finditer(
+        r"(?:(?:diametro|dn)\s*)?(\d+/\d{1,2})\s*(?:\"|pol|polegada|polegadas)",
+        texto,
+        flags=re.IGNORECASE,
+    ):
+        if ja_consumido(*match.span()):
+            continue
+        spans_consumidos.append(match.span())
+        polegadas.add(match.group(1))
+
+    for match in re.finditer(
+        r"diametro\s*(\d+/\d{1,2})(?!\s*/)",
+        texto,
+        flags=re.IGNORECASE,
+    ):
+        if ja_consumido(*match.span()):
+            continue
+        spans_consumidos.append(match.span())
+        polegadas.add(match.group(1))
+
+    for match in re.finditer(
+        r"(?<![\d./-])(\d+(?:\.\d+)?)\s*(?:\"|pol|polegada|polegadas)",
+        texto,
+        flags=re.IGNORECASE,
+    ):
+        if ja_consumido(*match.span()):
+            continue
+        spans_consumidos.append(match.span())
+        polegadas.add(_normalizar_valor_tecnico(match.group(1)))
     return polegadas
 
 
@@ -266,98 +341,47 @@ def inferir_familia_principal(
 ) -> Optional[str]:
     if not familias_detectadas:
         return None
-    prioridade = [
-        "hidrante",
-        "vaso_sanitario",
-        "cuba",
-        "sifao",
-        "isolamento",
-        "disjuntor",
-        "contator",
-        "rele",
-        "interruptor",
-        "tomada",
-        "quadro",
-        "painel",
-        "valvula",
-        "flange",
-        "grampo",
-        "bucha",
-        "te",
-        "curva",
-        "reducao",
-        "luva",
-        "terminal",
-        "tubo",
-        "eletroduto",
-        "cabo",
-        "porta",
-        "janela",
-        "piso",
-        "concreto",
-        "argamassa",
-        "alvenaria",
-        "pintura",
-        "escavacao",
-    ]
+
     pontuacoes: List[Tuple[int, int, str]] = []
     for familia in familias_detectadas:
         aliases = aliases_familias.get(familia, [])
+        negativos = FAMILY_NEGATIVE_CONTEXT.get(familia, [])
+        requeridos = FAMILY_REQUIRED_ANY.get(familia, [])
+
+        if any(negativo in texto for negativo in negativos):
+            continue
+        if requeridos and not any(token in texto for token in requeridos):
+            continue
+
         score = sum(
             1 for alias in aliases if re.search(rf"(^|[^\w]){re.escape(alias)}($|[^\w])", texto)
         )
-        prioridade_idx = prioridade.index(familia) if familia in prioridade else len(prioridade)
+        if familia == "painel" and any(token in texto for token in ("qgbt", "qdc", "qdl", "ccm", "painel eletrico")):
+            score += 2
+        if familia == "terminal" and any(token in texto for token in ("circuitos terminais", "circuito terminal")):
+            score -= 3
+
+        prioridade_idx = PRIORITY_ORDER.get(familia, 999)
         pontuacoes.append((score, -prioridade_idx, familia))
+
+    if not pontuacoes:
+        return None
     pontuacoes.sort(reverse=True)
     return pontuacoes[0][2]
-
 
 def inferir_subfamilias(texto: str, familia_principal: Optional[str]) -> Set[str]:
     if not familia_principal:
         return set()
-    subfamilias_por_familia: Dict[str, Dict[str, List[str]]] = {
-        "cabo": {
-            "afumex": ["afumex"],
-            "monopolar": ["monopolar", "1x1c", "1c#", "singelo"],
-            "tripolar": ["tripolar", "3x", "3c#"],
-            "tetrapolar": ["tetrapolar", "4x", "4c#"],
-            "flexivel": ["flexivel"],
-            "epr": ["epr"],
-            "xlpe": ["xlpe"],
-            "pvc": ["pvc"],
-        },
-        "tubo": {
-            "roscavel": ["rosca", "roscavel", "npt"],
-            "galvanizado": ["galvanizado"],
-            "solda": ["solda", "bisel", "biselada"],
-            "sem_costura": ["sem costura", "sc"],
-            "com_costura": ["com costura", "cc"],
-        },
-        "disjuntor": {
-            "minidisjuntor": ["minidisjuntor", "mini disjuntor"],
-            "monopolar": ["monopolar", "1p", "1 p", "1 polo"],
-            "bipolar": ["bipolar", "2p", "2 p", "2 polos"],
-            "tripolar": ["tripolar", "3p", "3 p", "3 polos"],
-            "tetrapolar": ["tetrapolar", "4p", "4 p", "4 polos"],
-            "curva_b": ["curva b"],
-            "curva_c": ["curva c"],
-            "curva_d": ["curva d"],
-        },
-        "valvula": {
-            "esfera": ["esfera"],
-            "globo": ["globo"],
-            "gaveta": ["gaveta"],
-            "borboleta": ["borboleta"],
-        },
-    }
-    return _extrair_tokens_lista(texto, subfamilias_por_familia.get(familia_principal, {}))
-
+    return _extrair_tokens_lista(texto, SUBFAMILY_ALIASES.get(familia_principal, {}))
 
 def inferir_natureza_item(
     texto: str,
     familias_detectadas: Set[str],
     familia_principal: Optional[str],
 ) -> str:
+    if any(marcador in texto for marcador in SERVICE_ADMIN_MARKERS):
+        return "servico_administrativo"
+
     marcadores_servico = [
         "fornecimento e instalacao",
         "execucao",
@@ -412,78 +436,8 @@ def inferir_natureza_item(
         return "item_composto"
     return "item_simples"
 
-
 def extrair_atributos_tecnicos(texto: str) -> Dict[str, Set[str]]:
     tecnico = _normalizar_texto_tecnico(texto)
-
-    materiais = {
-        "cobre": ["cobre", "cobre estanhado", "liga de cobre"],
-        "aluminio": ["aluminio", "aluminio anodizado"],
-        "aco": ["aco", "aco carbono", "aco galvanizado", "galvanizado", "inox", "aco inox"],
-        "pvc": ["pvc", "pvc rigido"],
-        "pead": ["pead"],
-        "ppr": ["ppr"],
-        "cpvc": ["cpvc"],
-        "concreto": ["concreto"],
-        "argamassa": ["argamassa"],
-        "madeira": ["madeira", "compensado"],
-        "gesso": ["gesso", "drywall", "gesso acartonado"],
-        "ceramica": ["ceramica", "porcelanato"],
-        "vidro": ["vidro"],
-    }
-    familias = {
-        "hidrante": ["hidrante", "coluna de hidrante", "hidrante tipo coluna"],
-        "vaso_sanitario": ["vaso sanitario", "bacia sanitaria", "caixa acoplada", "louca"],
-        "cuba": ["cuba", "cubas", "cuba de embutir", "cuba inox", "cuba em inox"],
-        "sifao": ["sifao", "sifao metalico"],
-        "isolamento": ["isolamento", "isolante", "la de rocha", "lã de rocha"],
-        "terminal": ["terminal", "terminais", "conector", "olhal", "sapata"],
-        "cabo": ["cabo", "cabos", "condutor", "condutores"],
-        "disjuntor": ["disjuntor", "disjuntores", "minidisjuntor", "mini disjuntor", "mini-disjuntor"],
-        "contator": ["contator", "contatores"],
-        "rele": ["rele", "reles", "relé", "relés"],
-        "interruptor": ["interruptor", "interruptores"],
-        "tomada": ["tomada", "tomadas", "plug", "plugs", "plugue", "plugues"],
-        "quadro": ["quadro de distribuicao", "qdc", "qdl", "qgbt"],
-        "painel": ["painel", "paineis", "ccm"],
-        "tubo": ["tubo", "tubos", "tubulacao", "tubulacoes", "cano", "canos"],
-        "eletroduto": ["eletroduto", "eletrodutos", "conduite", "conduites"],
-        "grampo": ["grampo", "grampos", "suporte u", "abracadeira", "abraçadeira"],
-        "bucha": ["bucha", "buchas"],
-        "te": ["te de reducao", "te reto", "te", "tê", "tee"],
-        "curva": ["curva", "joelho", "cotovelo"],
-        "reducao": ["reducao", "redução"],
-        "luva": ["luva", "meia luva", "uniao", "união"],
-        "flange": ["flange", "flanges"],
-        "valvula": ["valvula", "valvulas", "válvula", "válvulas", "registro", "registros"],
-        "concreto": ["concreto"],
-        "argamassa": ["argamassa", "rejunte", "chapisco", "reboco", "emboço", "emboco"],
-        "alvenaria": ["alvenaria", "bloco", "tijolo"],
-        "piso": ["piso", "revestimento", "porcelanato", "ceramica"],
-        "porta": ["porta"],
-        "janela": ["janela", "esquadria"],
-        "pintura": ["pintura", "tinta", "selador", "verniz"],
-        "escavacao": ["escavacao", "aterro", "compactacao"],
-    }
-    classes = {
-        "aci": ["ac-i", "ac i", "aci"],
-        "acii": ["ac-ii", "ac ii", "acii"],
-        "aciii": ["ac-iii", "ac iii", "aciii"],
-        "sch40": ["sch 40", "sch. 40", "schedule 40"],
-        "sch80": ["sch 80", "sch. 80", "schedule 80"],
-        "sn4": ["sn4", "sn 4"],
-        "sn8": ["sn8", "sn 8"],
-        "pn10": ["pn10", "pn 10"],
-        "pn16": ["pn16", "pn 16"],
-        "pba": ["pba"],
-        "soldavel": ["soldavel"],
-        "roscavel": ["roscavel"],
-        "flexivel": ["flexivel"],
-        "rigido": ["rigido"],
-        "din": ["tipo din", "trilho din", "din"],
-        "termomagnetico": ["termomagnetico", "termo magnetico"],
-        "caixa_moldada": ["caixa moldada"],
-    }
 
     atributos: Dict[str, Set[str]] = {
         "bitola_mm2": _extrair_valores(r"(?<!\d)(\d+(?:\.\d+)?)\s*mm\s*2\b", tecnico),
@@ -498,6 +452,7 @@ def extrair_atributos_tecnicos(texto: str) -> Dict[str, Set[str]]:
         "corrente_a": _extrair_valores(r"\b(\d+(?:\.\d+)?)\s*a\b", tecnico),
         "interrupcao_ka": _extrair_valores(r"\b(\d+(?:\.\d+)?)\s*ka\b", tecnico),
         "angulo_graus": _extrair_valores(r"\b(?:curva|cotovelo)?\s*(45|90)\s*(?:graus|grau)?\b", tecnico),
+        "normas": _extrair_normas(tecnico),
         "polos": _extrair_tokens_lista(
             tecnico,
             {
@@ -511,20 +466,48 @@ def extrair_atributos_tecnicos(texto: str) -> Dict[str, Set[str]]:
             tecnico,
             {"b": ["curva b"], "c": ["curva c"], "d": ["curva d"]},
         ),
-        "materiais": _extrair_tokens_lista(tecnico, materiais),
-        "familias": _extrair_tokens_lista(tecnico, familias),
-        "classes": _extrair_tokens_lista(tecnico, classes),
+        "materiais": _extrair_tokens_lista(tecnico, MATERIAL_ALIASES),
+        "classes": _extrair_tokens_lista(tecnico, CLASS_ALIASES),
     }
 
-    familia_principal = inferir_familia_principal(tecnico, atributos["familias"], familias) if atributos["familias"] else None
+    familias_detectadas: Set[str] = set()
+    for familia, aliases in FAMILY_ALIASES.items():
+        encontrou_alias = any(
+            re.search(rf"(^|[^\w]){re.escape(alias)}($|[^\w])", tecnico)
+            for alias in aliases
+        )
+        if not encontrou_alias:
+            continue
+        negativos = FAMILY_NEGATIVE_CONTEXT.get(familia, [])
+        if any(negativo in tecnico for negativo in negativos):
+            continue
+        requeridos = FAMILY_REQUIRED_ANY.get(familia, [])
+        if requeridos and not any(token in tecnico for token in requeridos):
+            continue
+        familias_detectadas.add(familia)
+
+    # Recover shorthand-heavy electrical protection descriptions even when the
+    # word "disjuntor" is omitted from the text.
+    if "disjuntor" not in familias_detectadas:
+        if atributos["polos"] and atributos["corrente_a"] and (
+            "termomagnetico" in atributos["classes"] or "caixa_moldada" in atributos["classes"] or "tmf" in tecnico
+        ):
+            familias_detectadas.add("disjuntor")
+
+    atributos["familias"] = familias_detectadas
+    familia_principal = inferir_familia_principal(tecnico, familias_detectadas, FAMILY_ALIASES) if familias_detectadas else None
     if familia_principal:
         atributos["familia_principal"] = {familia_principal}
+        atributos["macrodominio"] = {DOMAIN_BY_FAMILY.get(familia_principal, "geral")}
         subfamilias = inferir_subfamilias(tecnico, familia_principal)
         if subfamilias:
             atributos["subfamilias"] = subfamilias
-        atributos["natureza_item"] = {inferir_natureza_item(tecnico, atributos["familias"], familia_principal)}
-    return {chave: valores for chave, valores in atributos.items() if valores}
+        atributos["natureza_item"] = {inferir_natureza_item(tecnico, familias_detectadas, familia_principal)}
+    elif any(marcador in tecnico for marcador in SERVICE_ADMIN_MARKERS):
+        atributos["natureza_item"] = {"servico_administrativo"}
+        atributos["macrodominio"] = {"canteiro_e_administracao"}
 
+    return {chave: valores for chave, valores in atributos.items() if valores}
 
 def detectar_coincidencias_tecnicas(atributos_busca: Dict[str, Set[str]], atributos_base: Dict[str, Set[str]]) -> List[str]:
     coincidencias: List[str] = []
@@ -545,9 +528,11 @@ def detectar_conflitos_tecnicos(atributos_busca: Dict[str, Set[str]], atributos_
         "diametro_mm",
         "diametro_cm",
         "materiais",
+        "macrodominio",
         "familia_principal",
         "subfamilias",
         "classes",
+        "normas",
         "tensao_v",
         "tensao_kv",
         "corrente_a",
@@ -590,8 +575,10 @@ def avaliar_confianca_match(
         "diametro_mm",
         "diametro_cm",
         "familia_principal",
+        "macrodominio",
         "subfamilias",
         "classes",
+        "normas",
         "corrente_a",
         "polos",
         "curva_disparo",
@@ -611,6 +598,10 @@ def avaliar_confianca_match(
         motivos.append("sem_match_estrutural")
     if "familia_principal" in conflitos_set and score_final < 0.80:
         motivos.append("conflito_de_familia_principal")
+    if "macrodominio" in conflitos_set and score_final < 0.76:
+        motivos.append("conflito_de_macrodominio")
+    if "normas" in conflitos_set and score_final < 0.82:
+        motivos.append("conflito_de_norma_tecnica")
     if "polos" in conflitos_set and score_final < 0.85:
         motivos.append("conflito_de_polos")
     if "corrente_a" in conflitos_set and score_final < 0.85:
@@ -645,6 +636,7 @@ def _score_bonus_tecnico(atributos_busca: Dict[str, Set[str]], atributos_base: D
     bonus = 0.0
     pesos = {
         "familia_principal": 0.14,
+        "macrodominio": 0.10,
         "subfamilias": 0.08,
         "bitola_mm2": 0.08,
         "dn": 0.08,
@@ -653,6 +645,7 @@ def _score_bonus_tecnico(atributos_busca: Dict[str, Set[str]], atributos_base: D
         "diametro_mm": 0.08,
         "diametro_cm": 0.08,
         "classes": 0.06,
+        "normas": 0.12,
         "materiais": 0.05,
         "tensao_v": 0.07,
         "tensao_kv": 0.07,
@@ -667,6 +660,7 @@ def _score_bonus_tecnico(atributos_busca: Dict[str, Set[str]], atributos_base: D
         bonus += pesos.get(chave, 0.03)
     pesos_conflito = {
         "familia_principal": 0.22,
+        "macrodominio": 0.16,
         "subfamilias": 0.14,
         "bitola_mm2": 0.18,
         "dn": 0.18,
@@ -675,6 +669,7 @@ def _score_bonus_tecnico(atributos_busca: Dict[str, Set[str]], atributos_base: D
         "diametro_mm": 0.20,
         "diametro_cm": 0.20,
         "classes": 0.12,
+        "normas": 0.24,
         "materiais": 0.10,
         "tensao_v": 0.16,
         "tensao_kv": 0.16,
@@ -690,12 +685,147 @@ def _score_bonus_tecnico(atributos_busca: Dict[str, Set[str]], atributos_base: D
     return bonus, coincidencias, conflitos
 
 
+def _ajuste_compatibilidade_de_familia(
+    busca_norm: str,
+    texto_base_norm: str,
+    atributos_busca: Dict[str, Set[str]],
+    atributos_base: Dict[str, Set[str]],
+) -> float:
+    familia_busca = next(iter(atributos_busca.get("familia_principal", set())), None)
+    familia_base = next(iter(atributos_base.get("familia_principal", set())), None)
+    if not familia_busca or not familia_base:
+        return 0.0
+
+    bonus = 0.0
+    if familia_busca == familia_base:
+        bonus += 0.10
+    else:
+        bonus -= 0.06
+
+    penalidades_fortes = {
+        ("te", "curva"): 0.34,
+        ("curva", "te"): 0.22,
+        ("flange", "junta"): 0.34,
+        ("tubo", "luva"): 0.30,
+        ("tubo", "curva"): 0.26,
+        ("tubo", "te"): 0.24,
+        ("tubo", "sensor"): 0.36,
+        ("tubo", "eletroduto"): 0.40,
+        ("filtro", "eletroduto"): 0.34,
+        ("filtro", "tubo"): 0.10,
+        ("disjuntor", "tomada"): 0.32,
+        ("disjuntor", "cabo"): 0.28,
+        ("disjuntor", "eletroduto"): 0.28,
+    }
+    bonus -= penalidades_fortes.get((familia_busca, familia_base), 0.0)
+
+    if familia_busca == "te":
+        if "te" in busca_norm and "te" in texto_base_norm:
+            bonus += 0.20
+        if any(token in texto_base_norm for token in ("cotovelo", "curva 90", "joelho")):
+            bonus -= 0.25
+
+    if familia_busca == "flange":
+        if "cego" in busca_norm and "cego" in texto_base_norm:
+            bonus += 0.18
+        if "junta" in texto_base_norm:
+            bonus -= 0.30
+
+    if familia_busca == "tubo":
+        if "tubo" in texto_base_norm:
+            bonus += 0.14
+        if any(token in texto_base_norm for token in ("luva", "curva", "te ", "te de", "sensor", "eletroduto")):
+            bonus -= 0.16
+
+    if familia_busca == "filtro":
+        if any(token in texto_base_norm for token in ("filtro", "coalescente", "separador")):
+            bonus += 0.18
+        if any(token in texto_base_norm for token in ("condulete", "sarjeta", "eletroduto")):
+            bonus -= 0.24
+
+    if familia_busca == "disjuntor":
+        if "disjuntor" in texto_base_norm:
+            bonus += 0.20
+
+    return bonus
+
+
+def _selecionar_pool_por_familia(
+    similaridades,
+    attrs_base_lista: List[Dict[str, Set[str]]],
+    atributos_busca: Dict[str, Set[str]],
+    limite_final: int,
+) -> List[int]:
+    total_base = len(attrs_base_lista)
+    if total_base == 0:
+        return []
+
+    limite_recall = min(total_base, max(TOP_K_RECALL_AMPLIADO, limite_final * 6, TOP_K_RERANK_TECNICO * 2))
+    ordem_recall = similaridades.argsort()[::-1][:limite_recall]
+
+    familia_alvo = next(iter(atributos_busca.get("familia_principal", set())), None)
+    dominio_alvo = next(iter(atributos_busca.get("macrodominio", set())), None)
+
+    if not familia_alvo and not dominio_alvo:
+        return [int(idx) for idx in ordem_recall[:limite_final]]
+
+    mesmo_item: List[int] = []
+    mesmo_dominio: List[int] = []
+    outros: List[int] = []
+
+    for idx in ordem_recall:
+        atributos_base = attrs_base_lista[int(idx)]
+        familia_base = next(iter(atributos_base.get("familia_principal", set())), None)
+        dominio_base = next(iter(atributos_base.get("macrodominio", set())), None)
+
+        if familia_alvo and familia_base == familia_alvo:
+            mesmo_item.append(int(idx))
+        elif dominio_alvo and dominio_base == dominio_alvo:
+            mesmo_dominio.append(int(idx))
+        else:
+            outros.append(int(idx))
+
+    pool: List[int] = []
+    vistos: Set[int] = set()
+
+    def adicionar(indices: List[int], limite: int) -> None:
+        for idx in indices[:limite]:
+            if idx in vistos:
+                continue
+            vistos.add(idx)
+            pool.append(idx)
+
+    cotas_familia = {
+        "disjuntor": 160,
+        "tubo": 160,
+        "te": 140,
+        "curva": 140,
+        "flange": 140,
+        "filtro": 120,
+        "valvula": 120,
+    }
+    cota_mesma_familia = min(limite_final, cotas_familia.get(familia_alvo or "", 120))
+    cota_mesmo_dominio = min(max(40, limite_final // 3), limite_final)
+
+    adicionar(mesmo_item, cota_mesma_familia)
+    adicionar(mesmo_dominio, cota_mesmo_dominio)
+    adicionar([int(idx) for idx in ordem_recall], limite_final)
+
+    return pool[:limite_final]
+
+
 def preparar_base_para_busca(df_base: pd.DataFrame, coluna_texto_base: str):
     df_base_proc = df_base.copy()
     df_base_proc[coluna_texto_base] = df_base_proc[coluna_texto_base].fillna("").astype(str)
     df_base_proc["__texto_base_original__"] = df_base_proc[coluna_texto_base]
     df_base_proc["__texto_base_norm__"] = df_base_proc[coluna_texto_base].map(normalizar_texto)
     df_base_proc["__atributos_tecnicos__"] = df_base_proc[coluna_texto_base].map(extrair_atributos_tecnicos)
+    df_base_proc["__familia_principal__"] = df_base_proc["__atributos_tecnicos__"].map(
+        lambda attrs: next(iter(attrs.get("familia_principal", set())), None)
+    )
+    df_base_proc["__macrodominio__"] = df_base_proc["__atributos_tecnicos__"].map(
+        lambda attrs: next(iter(attrs.get("macrodominio", set())), None)
+    )
 
     vetorizador = TfidfVectorizer(
         analyzer="char_wb",
@@ -737,7 +867,12 @@ def buscar_melhor_item_em_lote(
 
         busca_original = buscas_originais_por_norm.get(busca_norm, busca_norm)
         atributos_busca = extrair_atributos_tecnicos(busca_original)
-        melhores_indices = similaridades.argsort()[::-1][:k]
+        melhores_indices = _selecionar_pool_por_familia(
+            similaridades=similaridades,
+            attrs_base_lista=attrs_base_lista,
+            atributos_busca=atributos_busca,
+            limite_final=k,
+        )
 
         candidatos_ranqueados: List[dict] = []
         for idx_base in melhores_indices:
@@ -748,12 +883,18 @@ def buscar_melhor_item_em_lote(
             score_fuzzy = fuzz.token_set_ratio(busca_norm, texto_base_norm) / 100.0
             score_reg = score_regras(busca_norm, texto_base_norm)
             bonus_tecnico, coincidencias, conflitos = _score_bonus_tecnico(atributos_busca, atributos_base)
+            bonus_familia = _ajuste_compatibilidade_de_familia(
+                busca_norm=busca_norm,
+                texto_base_norm=texto_base_norm,
+                atributos_busca=atributos_busca,
+                atributos_base=atributos_base,
+            )
             score_base = (PESO_SEMANTICO * score_sem) + (PESO_FUZZY * score_fuzzy) + (PESO_REGRAS * score_reg)
             score_final = max(
                 0.0,
                 min(
                     1.0,
-                    score_base + bonus_tecnico,
+                    score_base + bonus_tecnico + bonus_familia,
                 ),
             )
             candidatos_ranqueados.append(
@@ -765,6 +906,7 @@ def buscar_melhor_item_em_lote(
                     "score_semantico": round(score_sem, 4),
                     "score_fuzzy": round(score_fuzzy, 4),
                     "score_regras": round(score_reg, 4),
+                    "score_familia": round(bonus_familia, 4),
                     "familia_principal": sorted(atributos_base.get("familia_principal", set())),
                     "subfamilias": sorted(atributos_base.get("subfamilias", set())),
                     "natureza_item": sorted(atributos_base.get("natureza_item", set())),

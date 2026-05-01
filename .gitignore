@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+# Local copies of private budget files used for taxonomy extraction
+taxonomy_inputs/
+
+# Generated artifacts from local taxonomy and benchmark runs
+taxonomy/seed_from_bases.json
+docs/taxonomy_seed_report.md
+benchmarks/results/

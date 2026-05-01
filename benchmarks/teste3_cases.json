@@ -1,0 +1,68 @@
+[
+  {
+    "line": 141,
+    "description": "TUBO, AC, ASTM A53/A53M Gr. B, SC, SCH 80, C/ ROSCA NPT, ASME B36.10M. Ø1.1/4”",
+    "expected_family": "tubo",
+    "required_keywords_all": ["tubo"],
+    "required_keywords_any": ["astm", "sch 80", "rosca", "npt", "asme b36.10"],
+    "forbidden_keywords": ["sensor", "condulete", "eletroduto"]
+  },
+  {
+    "line": 155,
+    "description": "TUBO, AC, ASTM A53/A53M Gr. B, CC, SCH 40, PC, ASME B36.10M. Ø3”",
+    "expected_family": "tubo",
+    "required_keywords_all": ["tubo"],
+    "required_keywords_any": ["astm", "sch 40", "rosca", "npt", "asme b36.10"],
+    "forbidden_keywords": ["eletroduto", "seal tubo", "sensor"]
+  },
+  {
+    "line": 275,
+    "description": "FILTRO DE AR COALESCENTE SEPARADOR DE CONDENSADO Ø 1.1/2",
+    "expected_family": "filtro",
+    "preferred_keywords": ["filtro", "coalescente"],
+    "forbidden_keywords": ["condulete", "sarjeta", "pvc"]
+  },
+  {
+    "line": 283,
+    "description": "TE 90 ACO CARBONO 3000LBS ENCAIXE SOLDA Ø 1/2",
+    "expected_family": "te",
+    "preferred_keywords": ["te", "3000", "solda"],
+    "forbidden_keywords": ["cotovelo", "curva 90"]
+  },
+  {
+    "line": 284,
+    "description": "TE 90 ACO CARBONO 3000LBS ENCAIXE SOLDA Ø 1”",
+    "expected_family": "te",
+    "preferred_keywords": ["te", "3000", "solda"],
+    "forbidden_keywords": ["cotovelo", "curva 90"]
+  },
+  {
+    "line": 285,
+    "description": "TE 90 ACO CARBONO 3000LBS ENCAIXE SOLDA Ø 1.1/4”",
+    "expected_family": "te",
+    "preferred_keywords": ["te", "3000", "solda"],
+    "forbidden_keywords": ["cotovelo", "curva 90"]
+  },
+  {
+    "line": 311,
+    "description": "FLANGE CEGO ACO CARBONO PADRAO ANSI B 16.5 CL 150 LBS Ø 2",
+    "expected_family": "flange",
+    "required_keywords_all": ["flange"],
+    "required_keywords_any": ["cego", "150", "b16.5"],
+    "forbidden_keywords": ["junta"]
+  },
+  {
+    "line": 399,
+    "description": "3P 80A A0C 100 TMF 80-800 F F",
+    "expected_family": "disjuntor",
+    "preferred_keywords": ["disjuntor"],
+    "forbidden_keywords": ["pvc", "sarjeta", "chapa"]
+  },
+  {
+    "line": 400,
+    "description": "3P 125A A1A 125 TMF 125-1250 F F",
+    "expected_family": "disjuntor",
+    "preferred_keywords": ["disjuntor"],
+    "forbidden_keywords": ["pvc", "sarjeta", "chapa"]
+  }
+]
